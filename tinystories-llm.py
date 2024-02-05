@@ -299,14 +299,9 @@ class Transformer(nn.Module):
         return logits
 
     @torch.inference_mode()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        Also note this is a super inefficient version of sampling with no key/value cache.
-        """
-        for _ in range(max_new_tokens):
+    def generate(self, idx, temperature=1.0, top_k=None):
+        # Return initial sequence
+        while True:
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = (
                 idx
@@ -329,10 +324,10 @@ class Transformer(nn.Module):
                 # apply softmax to convert logits to (normalized) probabilities
                 probs = nn.functional.softmax(logits, dim=-1)
                 idx_next = torch.multinomial(probs, num_samples=1)
+            # return next token
+            yield idx_next.item()
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
-
-        return idx
 
 
 class Tokenizer:
@@ -346,7 +341,6 @@ class Tokenizer:
         self.bos_id: int = self.sp_model.bos_id()
         self.eos_id: int = self.sp_model.eos_id()
         self.pad_id: int = self.sp_model.pad_id()
-        # print(f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}")
         assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
 
     def encode(self, s: str, bos: bool, eos: bool) -> List[int]:
@@ -360,6 +354,13 @@ class Tokenizer:
 
     def decode(self, t: List[int]) -> str:
         return self.sp_model.decode(t)
+
+    def decode_id(self, t: int) -> str:
+        if t == self.bos_id:
+            return "\n\n"
+        rc = self.sp_model.IdToPiece(t)
+        # Sentencepiece uses Lower One Eighth Block (U+2581) as whitespace
+        return rc.replace("\u2581", " ") if rc != "<0x0A>" else "\n"
 
 
 def download_url(url: str) -> None:
@@ -391,18 +392,23 @@ def load_model(model_path: str, device: str) -> nn.Module:
 def run_inference(
     model_path="stories15M.pt",
     tokenizer_path="tokenizer.model",
+    prompt="Once upon a time",
     device="cpu",
-    seqlen=256,
+    seqlen=512,
 ):
     model = load_model(model_path, device)
     tokenizer = Tokenizer(tokenizer_path)
-    tokens = tokenizer.encode("Once upon a time", bos=True, eos=False)
+    tokens = tokenizer.encode(prompt, bos=False, eos=False)
     x = torch.tensor(tokens, device=device).reshape(1, -1)
+    print(prompt, end="", flush=True)
     start_time = datetime.now()
-    out = model.generate(x, seqlen)
+    for idx, tok in enumerate(model.generate(x)):
+        if idx > seqlen:
+            print("", flush=True)
+            break
+        print(tokenizer.decode_id(tok), end="", flush=True)
     duration = (datetime.now() - start_time).total_seconds()
-    print(tokenizer.decode(out.flatten().tolist()))
-    print(f"Speed {seqlen/duration:.2f} tokens per second")
+    print(f"Speed is {seqlen/duration:.2f} tokens per second")
 
 
 if __name__ == "__main__":
