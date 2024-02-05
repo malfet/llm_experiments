@@ -1,6 +1,7 @@
 # Taken from llama code and lightly modified
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# Self contained script that can be used to benchmark PyTorch inference speed
 
 import os
 from dataclasses import dataclass
