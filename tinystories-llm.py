@@ -379,7 +379,7 @@ def load_model(model_path: str, device: str) -> nn.Module:
     else:
         gptconf = ModelArgs()
         state_dict = checkpoint_dict
-    model = Transformer(gptconf, use_flash=None if device != "mps" else False)
+    model = Transformer(gptconf)
     unwanted_prefix = "_orig_mod."
     for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
@@ -412,8 +412,9 @@ def run_inference(
 
 
 if __name__ == "__main__":
+    import sys
     download_url("https://github.com/karpathy/llama2.c/raw/master/tokenizer.model")
     download_url(
         "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.pt"
     )
-    run_inference()
+    run_inference(device=sys.argv[1] if len(sys.argv) == 2 else "cpu")
