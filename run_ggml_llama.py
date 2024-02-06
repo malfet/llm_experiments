@@ -1,7 +1,13 @@
 import os
 import sys
-from subprocess import check_call, check_output
 from urllib.request import urlopen
+
+
+def check_call(args) -> None:
+    from subprocess import PIPE, Popen, STDOUT
+
+    with Popen(args, stdout=PIPE, stderr=STDOUT) as p:
+        print(p.stdout.read().decode("utf-8"))
 
 
 def download_url(url: str) -> None:
