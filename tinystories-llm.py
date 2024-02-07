@@ -106,6 +106,7 @@ class Attention(nn.Module):
         x: torch.Tensor,
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
+        mask: torch.Tensor
     ):
         bsz, seqlen, _ = x.shape
 
@@ -129,9 +130,8 @@ class Attention(nn.Module):
             xq,
             xk,
             xv,
-            attn_mask=None,
+            attn_mask=mask,
             dropout_p=0,
-            is_causal=True,
         )
         # restore time as batch dimension and concat heads
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
@@ -172,8 +172,8 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-    def forward(self, x, freqs_cos, freqs_sin):
-        h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
+    def forward(self, x, freqs_cos, freqs_sin, mask):
+        h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, mask)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
@@ -201,6 +201,8 @@ class Transformer(nn.Module):
         freqs_cos, freqs_sin = precompute_freqs_cis(
             self.params.dim // self.params.n_heads, self.params.max_seq_len
         )
+        causal_mask = torch.tril(torch.ones(self.params.max_seq_len, self.params.max_seq_len, dtype=torch.bool))
+        self.register_buffer("causal_mask", causal_mask, persistent=False)
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
@@ -228,9 +230,10 @@ class Transformer(nn.Module):
         h = self.tok_embeddings(tokens)
         freqs_cos = self.freqs_cos[:seqlen]
         freqs_sin = self.freqs_sin[:seqlen]
+        mask = self.causal_mask[None, None, :seqlen, :seqlen]
 
         for layer in self.layers:
-            h = layer(h, freqs_cos, freqs_sin)
+            h = layer(h, freqs_cos, freqs_sin, mask)
         h = self.norm(h)
 
         # inference-time mini-optimization: only forward the output on the very last position
