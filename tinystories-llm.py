@@ -84,7 +84,7 @@ def apply_rotary_emb(
 
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs, use_flash: bool):
+    def __init__(self, args: ModelArgs):
         super().__init__()
         model_parallel_size = 1
         self.n_local_heads = args.n_heads // model_parallel_size
@@ -95,14 +95,7 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Dropout(args.dropout)
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
-        self.flash = use_flash
         self._register_load_state_dict_pre_hook(self.load_hook)
-
-        # use flash attention or a manual implementation?
-        if not self.flash:
-            mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
-            mask = torch.triu(mask, diagonal=1)
-            self.register_buffer("mask", mask)
 
     def load_hook(self, state_dict, prefix, *args):
         if prefix + "wq.weight" in state_dict:
@@ -135,26 +128,14 @@ class Attention(nn.Module):
         xv = xv.transpose(1, 2)
 
         # flash implementation
-        if self.flash:
-            output = torch.nn.functional.scaled_dot_product_attention(
-                xq,
-                xk,
-                xv,
-                attn_mask=None,
-                dropout_p=self.dropout if self.training else 0.0,
-                is_causal=True,
-            )
-        else:
-            # manual implementation
-            scores = torch.matmul(xq, xk.transpose(2, 3)) / (self.head_dim**0.5)
-            assert hasattr(self, "mask")
-            scores = (
-                scores + self.mask[:, :, :seqlen, :seqlen]
-            )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-            scores = nn.functional.softmax(scores.float(), dim=-1).type_as(xq)
-            scores = self.attn_dropout(scores)
-            output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
-
+        output = torch.nn.functional.scaled_dot_product_attention(
+            xq,
+            xk,
+            xv,
+            attn_mask=None,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=True,
+        )
         # restore time as batch dimension and concat heads
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
 
@@ -181,12 +162,12 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, layer_id: int, args: ModelArgs, use_flash: bool):
+    def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args, use_flash)
+        self.attention = Attention(args)
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=args.hidden_dim,
@@ -206,14 +187,8 @@ class TransformerBlock(nn.Module):
 class Transformer(nn.Module):
     last_loss: Optional[torch.Tensor]
 
-    def __init__(self, params: ModelArgs, use_flash: Optional[bool] = None):
+    def __init__(self, params: ModelArgs):
         super().__init__()
-        if use_flash is None:
-            use_flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
-            if not use_flash:
-                print(
-                    "WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0"
-                )
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
@@ -222,7 +197,7 @@ class Transformer(nn.Module):
         self.dropout = nn.Dropout(params.dropout)
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
-            self.layers.append(TransformerBlock(layer_id, params, use_flash))
+            self.layers.append(TransformerBlock(layer_id, params))
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
 
