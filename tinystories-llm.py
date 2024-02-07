@@ -92,9 +92,6 @@ class Attention(nn.Module):
         # key, query, value projections for all heads, but in a batch
         self.wqkv = nn.Linear(args.dim, 3 * args.n_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
-        self.attn_dropout = nn.Dropout(args.dropout)
-        self.resid_dropout = nn.Dropout(args.dropout)
-        self.dropout = args.dropout
         self._register_load_state_dict_pre_hook(self.load_hook)
 
     def load_hook(self, state_dict, prefix, *args):
@@ -133,7 +130,7 @@ class Attention(nn.Module):
             xk,
             xv,
             attn_mask=None,
-            dropout_p=self.dropout if self.training else 0.0,
+            dropout_p=0,
             is_causal=True,
         )
         # restore time as batch dimension and concat heads
@@ -141,12 +138,11 @@ class Attention(nn.Module):
 
         # final projection into the residual stream
         output = self.wo(output)
-        output = self.resid_dropout(output)
         return output
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int, multiple_of: int, dropout: float):
+    def __init__(self, dim: int, hidden_dim: int, multiple_of: int):
         super().__init__()
         if hidden_dim is None:
             hidden_dim = 4 * dim
@@ -155,10 +151,9 @@ class FeedForward(nn.Module):
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.dropout(self.w2(nn.functional.silu(self.w1(x)) * self.w3(x)))
+        return self.w2(nn.functional.silu(self.w1(x)) * self.w3(x))
 
 
 class TransformerBlock(nn.Module):
@@ -172,7 +167,6 @@ class TransformerBlock(nn.Module):
             dim=args.dim,
             hidden_dim=args.hidden_dim,
             multiple_of=args.multiple_of,
-            dropout=args.dropout,
         )
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
@@ -185,8 +179,6 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    last_loss: Optional[torch.Tensor]
-
     def __init__(self, params: ModelArgs):
         super().__init__()
         self.params = params
@@ -194,7 +186,6 @@ class Transformer(nn.Module):
         self.n_layers = params.n_layers
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
-        self.dropout = nn.Dropout(params.dropout)
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
@@ -222,8 +213,6 @@ class Transformer(nn.Module):
                     p, mean=0.0, std=0.02 / (2 * params.n_layers) ** 0.5
                 )
 
-        # Initialize attribute for the loss of the last forward call. This will be set if the forward is called with a targets tensor.
-        self.last_loss = None
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -234,11 +223,10 @@ class Transformer(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(
-        self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None
+        self, tokens: torch.Tensor
     ) -> torch.Tensor:
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
-        h = self.dropout(h)
         freqs_cos = self.freqs_cos[:seqlen]
         freqs_sin = self.freqs_sin[:seqlen]
 
@@ -246,18 +234,10 @@ class Transformer(nn.Module):
             h = layer(h, freqs_cos, freqs_sin)
         h = self.norm(h)
 
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.output(h)
-            self.last_loss = nn.functional.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
-            )
-        else:
-            # inference-time mini-optimization: only forward the output on the very last position
-            logits = self.output(
-                h[:, [-1], :]
-            )  # note: using list [-1] to preserve the time dim
-            # self.last_loss = None
+        # inference-time mini-optimization: only forward the output on the very last position
+        logits = self.output(
+            h[:, [-1], :]
+        )  # note: using list [-1] to preserve the time dim
 
         return logits
 
@@ -380,6 +360,7 @@ def run_inference(
 
 if __name__ == "__main__":
     import sys
+
     download_url("https://github.com/karpathy/llama2.c/raw/master/tokenizer.model")
     download_url(
         "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.pt"
