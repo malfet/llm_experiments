@@ -360,10 +360,25 @@ def run_inference(
 
 
 if __name__ == "__main__":
-    import sys
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser("Simple LLM text generator")
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--model-path", type=str, default="stories15M.pt")
+    parser.add_argument("--random-seed", type=int, default=None)
+    parser.add_argument("--prompt", type=str, default="Once upon a time")
+    parser.add_argument("--seq-len", type=int, default=512)
+    args = parser.parse_args()
+    if args.random_seed is not None:
+        torch.manual_seed(args.random_seed)
 
     download_url("https://github.com/karpathy/llama2.c/raw/master/tokenizer.model")
     download_url(
         "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.pt"
     )
-    run_inference(device=sys.argv[1] if len(sys.argv) == 2 else "cpu")
+    run_inference(
+        device=args.device,
+        model_path=args.model_path,
+        prompt=args.prompt,
+        seqlen=args.seq_len,
+    )
