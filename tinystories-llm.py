@@ -83,6 +83,32 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
+class KVCache(nn.Module):
+    def __init__(self, max_batch_size, max_seq_length, n_heads, head_dim):
+        super().__init__()
+        cache_shape = (max_batch_size, n_heads, max_seq_length, head_dim)
+        self.register_buffer("k_cache", torch.zeros(cache_shape))
+        self.register_buffer("v_cache", torch.zeros(cache_shape))
+
+    def update(self, input_pos, k_val, v_val):
+        # input_pos: [S], k_val: [B, H, S, D]
+        assert input_pos.shape[0] == k_val.shape[2]
+
+        k_out = self.k_cache
+        v_out = self.v_cache
+        if input_pos.numel() == 1 and input_pos.item() >= k_out.shape[2]:
+            self.k_cache = k_out = torch.roll(k_out, 1, 2)
+            self.v_cache = v_out = torch.roll(v_out, 1, 2)
+            minus_one = torch.tensor([k_out.shape[2] - 1], device=k_out.device)
+            k_out[:, :minus_one] = k_val
+            v_out[:, :minus_one] = v_val
+        else:
+            k_out[:, :, input_pos] = k_val
+            v_out[:, :, input_pos] = v_val
+
+        return k_out, v_out
+
+
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -92,6 +118,7 @@ class Attention(nn.Module):
         # key, query, value projections for all heads, but in a batch
         self.wqkv = nn.Linear(args.dim, 3 * args.n_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
+        self.kv_cache = None
         self._register_load_state_dict_pre_hook(self.load_hook)
 
     def load_hook(self, state_dict, prefix, *args):
@@ -106,7 +133,8 @@ class Attention(nn.Module):
         x: torch.Tensor,
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
-        mask: torch.Tensor
+        mask: torch.Tensor,
+        input_pos: Optional[torch.Tensor],
     ):
         bsz, seqlen, _ = x.shape
 
@@ -124,6 +152,10 @@ class Attention(nn.Module):
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xk = xk.transpose(1, 2)
         xv = xv.transpose(1, 2)
+
+        # Update cache
+        if self.kv_cache is not None and input_pos is not None:
+            xk, xv = self.kv_cache.update(input_pos, xk, xv)
 
         # flash implementation
         output = torch.nn.functional.scaled_dot_product_attention(
@@ -172,8 +204,10 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-    def forward(self, x, freqs_cos, freqs_sin, mask):
-        h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, mask)
+    def forward(self, x, freqs_cos, freqs_sin, mask, input_pos):
+        h = x + self.attention.forward(
+            self.attention_norm(x), freqs_cos, freqs_sin, mask, input_pos
+        )
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
@@ -197,11 +231,22 @@ class Transformer(nn.Module):
             self.output.weight
         )  # https://paperswithcode.com/method/weight-tying
 
-        # some useful precompute for the RoPE relative positional embeddings
+        # Initialize caches
         freqs_cos, freqs_sin = precompute_freqs_cis(
             self.params.dim // self.params.n_heads, self.params.max_seq_len
         )
-        causal_mask = torch.tril(torch.ones(self.params.max_seq_len, self.params.max_seq_len, dtype=torch.bool))
+        causal_mask = torch.tril(
+            torch.ones(
+                self.params.max_seq_len, self.params.max_seq_len, dtype=torch.bool
+            )
+        )
+        for block in self.layers:
+            block.attention.kv_cache = KVCache(
+                1,
+                self.params.max_seq_len,
+                self.params.n_heads,
+                self.params.dim // self.params.n_heads,
+            )
         self.register_buffer("causal_mask", causal_mask, persistent=False)
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
@@ -224,16 +269,31 @@ class Transformer(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(
-        self, tokens: torch.Tensor
+        self, tokens: torch.Tensor, input_pos: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
-        freqs_cos = self.freqs_cos[:seqlen]
-        freqs_sin = self.freqs_sin[:seqlen]
-        mask = self.causal_mask[None, None, :seqlen, :seqlen]
+        if input_pos is not None and input_pos.numel() > 1:
+            freqs_cos = self.freqs_cos[input_pos]
+            freqs_sin = self.freqs_sin[input_pos]
+            mask = self.causal_mask[None, None, input_pos]
+        elif input_pos is not None:
+            freqs_cos = self.freqs_cos[input_pos % self.params.max_seq_len]
+            freqs_sin = self.freqs_sin[input_pos % self.params.max_seq_len]
+            mask = self.causal_mask[
+                None,
+                None,
+                input_pos
+                if input_pos.item() < self.params.max_seq_len
+                else torch.tensor([-1]),
+            ]
+        else:
+            freqs_cos = self.freqs_cos[:seqlen]
+            freqs_sin = self.freqs_sin[:seqlen]
+            mask = self.causal_mask[None, None, :seqlen, :seqlen]
 
         for layer in self.layers:
-            h = layer(h, freqs_cos, freqs_sin, mask)
+            h = layer(h, freqs_cos, freqs_sin, mask, input_pos)
         h = self.norm(h)
 
         # inference-time mini-optimization: only forward the output on the very last position
@@ -261,20 +321,21 @@ class Transformer(nn.Module):
             probs = nn.functional.softmax(logits, dim=-1)
             return torch.multinomial(probs, num_samples=1)
 
-        def append_idx(idx_next) -> None:
-            nonlocal idx
-            # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
-            # if the sequence context is growing too long crop it at block_size
-            if idx.size(1) > self.params.max_seq_len:
-                idx = idx[:, -self.params.max_seq_len :]
-
+        # Initialize cache state
+        logits = self(idx, input_pos=torch.arange(0, idx.size(1)))
+        idx_next = logits_to_idx(logits)
+        yield idx_next.item()
+        input_pos = torch.tensor(
+            [
+                idx.size(1),
+            ]
+        )
         while True:
             # forward the model to get the logits for the index in the sequence
-            logits = self(idx)
+            logits = self(idx_next, input_pos=input_pos)
             idx_next = logits_to_idx(logits)
             yield idx_next.item()
-            append_idx(idx_next)
+            input_pos += 1
 
 
 class Tokenizer:
