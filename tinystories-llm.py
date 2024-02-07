@@ -213,7 +213,6 @@ class Transformer(nn.Module):
                     p, mean=0.0, std=0.02 / (2 * params.n_layers) ** 0.5
                 )
 
-
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -243,34 +242,36 @@ class Transformer(nn.Module):
 
     @torch.inference_mode()
     def generate(self, idx, temperature=1.0, top_k=None):
-        # Return initial sequence
-        while True:
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = (
-                idx
-                if idx.size(1) <= self.params.max_seq_len
-                else idx[:, -self.params.max_seq_len :]
-            )
-            # forward the model to get the logits for the index in the sequence
-            logits = self(idx_cond)
+        def logits_to_idx(logits):
             logits = logits[:, -1, :]  # crop to just the final time step
             if temperature == 0.0:
                 # "sample" the single most likely index
                 _, idx_next = torch.topk(logits, k=1, dim=-1)
-            else:
-                # pluck the logits at the final step and scale by desired temperature
-                logits = logits / temperature
-                # optionally crop the logits to only the top k options
-                if top_k is not None:
-                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                    logits[logits < v[:, [-1]]] = -float("Inf")
-                # apply softmax to convert logits to (normalized) probabilities
-                probs = nn.functional.softmax(logits, dim=-1)
-                idx_next = torch.multinomial(probs, num_samples=1)
-            # return next token
-            yield idx_next.item()
+                return idx_next
+            # pluck the logits at the final step and scale by desired temperature
+            logits = logits / temperature
+            # optionally crop the logits to only the top k options
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float("Inf")
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = nn.functional.softmax(logits, dim=-1)
+            return torch.multinomial(probs, num_samples=1)
+
+        def append_idx(idx_next) -> None:
+            nonlocal idx
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
+            # if the sequence context is growing too long crop it at block_size
+            if idx.size(1) > self.params.max_seq_len:
+                idx = idx[:, -self.params.max_seq_len :]
+
+        while True:
+            # forward the model to get the logits for the index in the sequence
+            logits = self(idx)
+            idx_next = logits_to_idx(logits)
+            yield idx_next.item()
+            append_idx(idx_next)
 
 
 class Tokenizer:
