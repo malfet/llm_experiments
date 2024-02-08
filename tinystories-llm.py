@@ -423,7 +423,7 @@ def run_inference(
     print(f"Speed is {seqlen/duration:.2f} tokens per second")
 
 
-if __name__ == "__main__":
+def parse_args():
     from argparse import ArgumentParser
 
     parser = ArgumentParser("Simple LLM text generator")
@@ -432,7 +432,15 @@ if __name__ == "__main__":
     parser.add_argument("--random-seed", type=int, default=None)
     parser.add_argument("--prompt", type=str, default="Once upon a time")
     parser.add_argument("--seq-len", type=int, default=512)
-    args = parser.parse_args()
+    # Do not attempt to parse CLI arguments if running inside notebook
+    return parser.parse_args([] if hasattr(__builtins__, "__IPYTHON__") else None)
+
+
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+
+    args = parse_args()
+
     if args.random_seed is not None:
         torch.manual_seed(args.random_seed)
 
