@@ -406,9 +406,12 @@ def run_inference(
     tokenizer_path="tokenizer.model",
     prompt="Once upon a time",
     device="cpu",
+    dtype=None,
     seqlen=512,
 ):
     model = load_model(model_path, device)
+    if dtype is not None:
+        model.to(dtype=getattr(torch, dtype))
     tokenizer = Tokenizer(tokenizer_path)
     tokens = tokenizer.encode(prompt, bos=False, eos=False)
     x = torch.tensor(tokens, device=device).reshape(1, -1)
@@ -432,6 +435,7 @@ def parse_args():
     parser.add_argument("--random-seed", type=int, default=None)
     parser.add_argument("--prompt", type=str, default="Once upon a time")
     parser.add_argument("--seq-len", type=int, default=512)
+    parser.add_argument("--dtype", type=str, default=None)
     # Do not attempt to parse CLI arguments if running inside notebook
     return parser.parse_args([] if hasattr(__builtins__, "__IPYTHON__") else None)
 
@@ -450,6 +454,7 @@ if __name__ == "__main__":
     )
     run_inference(
         device=args.device,
+        dtype=args.dtype,
         model_path=args.model_path,
         prompt=args.prompt,
         seqlen=args.seq_len,
