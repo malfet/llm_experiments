@@ -380,7 +380,7 @@ def download_url(url: str) -> None:
 
 
 def load_model(model_path: str, device: str) -> nn.Module:
-    checkpoint_dict = torch.load(model_path, map_location=device)
+    checkpoint_dict = torch.load(model_path, map_location=device, weights_only=True, mmap=True)
     if "model_args" in checkpoint_dict:
         model_args = checkpoint_dict["model_args"]
         if "n_kv_heads" in model_args:
