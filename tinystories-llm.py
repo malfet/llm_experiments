@@ -428,6 +428,27 @@ def run_inference(
     print(f"Speed is {seqlen/duration:.2f} tokens per second")
 
 
+def benchmark(
+    model_path: str = "stories15M.pt",
+    device: str = "cpu",
+    dtype: Optional[str] = None,
+) -> None:
+    model = load_model(model_path, device)
+    if dtype is not None:
+        model.to(dtype=getattr(torch, dtype))
+    x = torch.randint(3, 512, (1, model.params.max_seq_len), device=device)
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU], record_shapes=True
+    ) as prof:
+        for idx, tok in enumerate(model.generate(x)):
+            break
+    print(
+        prof.key_averages(group_by_input_shape=True).table(
+            sort_by="cpu_time_total"
+        )
+    )
+
+
 def parse_args():
     from argparse import ArgumentParser
 
@@ -438,6 +459,7 @@ def parse_args():
     parser.add_argument("--prompt", type=str, default="Once upon a time")
     parser.add_argument("--seq-len", type=int, default=512)
     parser.add_argument("--dtype", type=str, default=None)
+    parser.add_argument("--benchmark", action="store_true")
     # Do not attempt to parse CLI arguments if running inside notebook
     return parser.parse_args([] if hasattr(__builtins__, "__IPYTHON__") else None)
 
@@ -452,10 +474,13 @@ if __name__ == "__main__":
     download_url(
         "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.pt"
     )
-    run_inference(
-        device=args.device,
-        dtype=args.dtype,
-        model_path=args.model_path,
-        prompt=args.prompt,
-        seqlen=args.seq_len,
-    )
+    if args.benchmark:
+        benchmark(device=args.device, dtype=args.dtype, model_path=args.model_path)
+    else:
+        run_inference(
+            device=args.device,
+            dtype=args.dtype,
+            model_path=args.model_path,
+            prompt=args.prompt,
+            seqlen=args.seq_len,
+        )
