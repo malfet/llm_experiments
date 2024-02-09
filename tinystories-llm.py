@@ -443,8 +443,6 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    from argparse import ArgumentParser
-
     args = parse_args()
 
     if args.random_seed is not None:
