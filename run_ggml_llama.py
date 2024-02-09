@@ -41,11 +41,11 @@ def compile_llama_cpp(folder_name: str) -> None:
     check_call(["make", "-C", folder_name, "main"])
 
 
-def convert_model(folder_name: str, model_name: str) -> None:
+def convert_model(folder_name: str, model_name: str, dtype: str = "f32") -> None:
     if model_name == "stories15M.pt":
-        ctx = 388
+        ctx = 288
     elif model_name == "stories110M.pt":
-        ctx = 786
+        ctx = 768
     else:
         ctx = 4096
     check_call(
@@ -53,7 +53,7 @@ def convert_model(folder_name: str, model_name: str) -> None:
             sys.executable,
             f"{folder_name}/convert.py",
             "--outtype",
-            "f32",
+            dtype,
             "--vocab-dir",
             ".",
             model_name,
@@ -63,20 +63,35 @@ def convert_model(folder_name: str, model_name: str) -> None:
     )
 
 
-def run_inference_on_cpu(folder_name: str) -> None:
+def run_inference_on_cpu(
+        folder_name: str, dtype: str = "f32", prompt: str = "Once upon a time", seq_len: int = 1024
+) -> None:
     check_call(
         [
             f"{folder_name}/main",
             "-m",
-            "ggml-model-f32.gguf",
+            f"ggml-model-{dtype}.gguf",
             "--prompt",
-            "Once upon a time",
-            "-n",
-            "1024",
+            prompt,
+            "--n-predict",
+            str(seq_len),
             "--n-gpu-layers",
             "0",
         ]
     )
+
+
+def parse_args():
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser("Comple, convert and run llama.cpp")
+    parser.add_argument("--model-path", type=str, default="stories15M.pt")
+    parser.add_argument("--llama-branch", type=str, default="b2074")
+    parser.add_argument("--dtype", type=str, default="f32")
+    parser.add_argument("--prompt", type=str, default="Once upon a time")
+    parser.add_argument("--seq-len", type=int, default=1024)
+    # Do not attempt to parse CLI arguments if running inside notebook
+    return parser.parse_args([] if hasattr(__builtins__, "__IPYTHON__") else None)
 
 
 def main() -> None:
@@ -84,12 +99,12 @@ def main() -> None:
     download_url(
         "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.pt"
     )
+    args = parse_args()
     folder_name = "ggerganov_llama.cpp"
-    model_name = "stories15M.pt"
-    clone_llama_cpp(folder_name=folder_name)
+    clone_llama_cpp(folder_name=folder_name, branch=args.llama_branch)
     compile_llama_cpp(folder_name)
-    convert_model(folder_name, model_name)
-    run_inference_on_cpu(folder_name)
+    convert_model(folder_name, args.model_path, dtype=args.dtype)
+    run_inference_on_cpu(folder_name, dtype=args.dtype, prompt=args.prompt, seq_len=args.seq_len)
 
 
 if __name__ == "__main__":
