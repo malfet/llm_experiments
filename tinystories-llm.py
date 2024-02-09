@@ -380,7 +380,9 @@ def download_url(url: str) -> None:
 
 
 def load_model(model_path: str, device: str) -> nn.Module:
-    checkpoint_dict = torch.load(model_path, map_location=device, weights_only=True, mmap=True)
+    checkpoint_dict = torch.load(
+        model_path, map_location=device, weights_only=True, mmap=True
+    )
     if "model_args" in checkpoint_dict:
         model_args = checkpoint_dict["model_args"]
         if "n_kv_heads" in model_args:
@@ -402,13 +404,13 @@ def load_model(model_path: str, device: str) -> nn.Module:
 
 
 def run_inference(
-    model_path="stories15M.pt",
-    tokenizer_path="tokenizer.model",
-    prompt="Once upon a time",
-    device="cpu",
-    dtype=None,
-    seqlen=512,
-):
+    model_path: str = "stories15M.pt",
+    tokenizer_path: str = "tokenizer.model",
+    prompt: str = "Once upon a time",
+    device: str = "cpu",
+    dtype: Optional[str] = None,
+    seqlen: int = 512,
+) -> None:
     model = load_model(model_path, device)
     if dtype is not None:
         model.to(dtype=getattr(torch, dtype))
