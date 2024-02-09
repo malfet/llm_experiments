@@ -1,3 +1,8 @@
+# Benchmark torch.mm performance on varios platforms/dtypes
+# Against torch-2.2.0
+# |        | float32 | float16 | bfloat16 |
+# | M2 Pro |  103 us |   85ms  |   28 ms  |
+# | Tg4    |  484 us |  187ms  |   93 ms  |
 import torch
 from timeit import default_timer
 
@@ -13,4 +18,5 @@ def bench_mm(m, n, k, dtype):
 
 if __name__ == "__main__":
     bench_mm(256, 288, 768, torch.float32)
+    bench_mm(256, 288, 768, torch.bfloat16)
     bench_mm(256, 288, 768, torch.float16)
