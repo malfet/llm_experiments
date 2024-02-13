@@ -7,20 +7,40 @@
 # | Xeon 8275CL@3Ghz |  631 us |   64ms  |  3.27 ms |
 # | Xeon @2.2Ghz     | 1.67 ms |   93ms  | 73.52 ms |
 
-import torch
 from timeit import default_timer
 
-def bench_mm(m, n, k, dtype):
+import torch
+from torch.utils.benchmark import Measurement, Timer
+
+
+def bench_mm(
+    m, n, k,
+    dtype = torch.float32,
+    device:str = "cpu",
+    trans_a: bool = False, trans_b: bool = False
+) -> Measurement:
     setup = f"""
-     x = torch.rand({m}, {n}, dtype={dtype})
-     y = torch.rand({n}, {k}, dtype={dtype})
+     x = torch.rand({m}, {n}, dtype={dtype}, device="{device}") if not {trans_a} else torch.rand({n}, {m}, dtype={dtype}, device="{device}").t()
+     y = torch.rand({n}, {k}, dtype={dtype}, device="{device}") if not {trans_b} else torch.rand({k}, {n}, dtype={dtype}, device="{device}").t()
     """
 
-    from torch.utils.benchmark import Timer
-    t = Timer(stmt="torch.mm(x, y)", setup=setup, language="python", timer=default_timer)
-    print(t.blocked_autorange())
+    t = Timer(
+        stmt="torch.mm(x, y)", setup=setup, language="python", timer=default_timer
+    )
+    return t.blocked_autorange()
+
 
 if __name__ == "__main__":
-    bench_mm(256, 288, 768, torch.float32)
-    bench_mm(256, 288, 768, torch.float16)
-    bench_mm(256, 288, 768, torch.bfloat16)
+    m, n, k = 256, 288, 768
+    device="mps"
+    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+        rc = bench_mm(m, n, k, dtype, device=device)
+        print("notrans", dtype, f"{rc.mean*1e6:.2f} usec")
+
+    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+        rc = bench_mm(m, n, k, dtype, trans_a=True, device=device)
+        print("trans_a", dtype, f"{rc.mean*1e6:.2f} usec")
+
+    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+        rc = bench_mm(m, n, k, dtype, trans_b=True, device=device)
+        print("trans_b", dtype, f"{rc.mean*1e6:.2f} usec")
