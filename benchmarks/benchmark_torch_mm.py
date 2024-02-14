@@ -32,7 +32,7 @@ def bench_mm(
 
 if __name__ == "__main__":
     m, n, k = 256, 288, 768
-    device="mps"
+    device="cpu"
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
         rc = bench_mm(m, n, k, dtype, device=device)
         print("notrans", dtype, f"{rc.mean*1e6:.2f} usec")
