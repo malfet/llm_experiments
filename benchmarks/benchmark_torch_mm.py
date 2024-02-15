@@ -51,6 +51,24 @@ def bench_mv(
     return t.blocked_autorange()
 
 
+def plot_mv_perf(dtype=torch.float32):
+    import matplotlib.pyplot as plt
+    torch.set_num_threads(1)
+
+    sizes = [i for i in range(100, 1001, 100)]
+    times_nt = [bench_mv(n, n, dtype=dtype, trans_a=False).mean * 1e6 for n in sizes]
+    times_t = [bench_mv(n, n, dtype=dtype, trans_a=True).mean * 1e6 for n in sizes]
+    plt.figure(figsize=(10, 6))
+    plt.plot(sizes, times_nt, '-o', label=f"{dtype} normal")
+    plt.plot(sizes, times_t, '-o', label=f"{dtype} transposed")
+    plt.title('Benchmarking Matrix-Vector Multiplication')
+    plt.xlabel('Matrix Size (n x n)')
+    plt.ylabel('Time Taken (microeconds)')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
 if __name__ == "__main__":
     torch.set_num_threads(1)
     # m, n, k = 256, 288, 768
