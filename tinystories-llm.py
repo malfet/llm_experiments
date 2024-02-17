@@ -380,6 +380,7 @@ def download_url(url: str) -> None:
 
 
 def load_model(model_path: str, device: str) -> nn.Module:
+    start_time = datetime.now()
     checkpoint_dict = torch.load(
         model_path, map_location=device, weights_only=True, mmap=True
     )
@@ -400,6 +401,8 @@ def load_model(model_path: str, device: str) -> nn.Module:
             state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
     model.load_state_dict(state_dict, strict=False)
     model.to(device=device).eval()
+    duration = (datetime.now() - start_time).total_seconds()
+    print(f"Loaded {model_path} in {duration:.2f} seconds")
     return model
 
 
