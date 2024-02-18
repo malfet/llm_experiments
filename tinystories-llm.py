@@ -4,6 +4,7 @@
 # Self contained script that can be used to benchmark PyTorch inference speed
 
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple
@@ -379,28 +380,42 @@ def download_url(url: str) -> None:
         f.write(s.read())
 
 
-def load_model(model_path: str, device: str) -> nn.Module:
+@contextmanager
+def default_dtype(dtype=None):
+    orig_dtype = torch.get_default_dtype()
+    try:
+        if dtype is not None:
+            torch.set_default_dtype(dtype)
+        yield
+    finally:
+        torch.set_default_dtype(orig_dtype)
+
+
+def load_model(
+    model_path: str, device: str, dtype: Optional[torch.dtype] = None
+) -> nn.Module:
     start_time = datetime.now()
-    checkpoint_dict = torch.load(
-        model_path, map_location=device, weights_only=True, mmap=True
-    )
-    if "model_args" in checkpoint_dict:
-        model_args = checkpoint_dict["model_args"]
-        if "n_kv_heads" in model_args:
-            assert model_args["n_heads"] == model_args["n_kv_heads"]
-            del model_args["n_kv_heads"]
-        gptconf = ModelArgs(**model_args)
-        state_dict = checkpoint_dict["model"]
-    else:
-        gptconf = ModelArgs()
-        state_dict = checkpoint_dict
-    model = Transformer(gptconf)
-    unwanted_prefix = "_orig_mod."
-    for k, v in list(state_dict.items()):
-        if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
-    model.load_state_dict(state_dict, strict=False)
-    model.to(device=device).eval()
+    with default_dtype(dtype):
+        checkpoint_dict = torch.load(
+            model_path, map_location=device, weights_only=True, mmap=True
+        )
+        if "model_args" in checkpoint_dict:
+            model_args = checkpoint_dict["model_args"]
+            if "n_kv_heads" in model_args:
+                assert model_args["n_heads"] == model_args["n_kv_heads"]
+                del model_args["n_kv_heads"]
+            gptconf = ModelArgs(**model_args)
+            state_dict = checkpoint_dict["model"]
+        else:
+            gptconf = ModelArgs()
+            state_dict = checkpoint_dict
+        model = Transformer(gptconf)
+        unwanted_prefix = "_orig_mod."
+        for k, v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+        model.load_state_dict(state_dict, strict=False)
+        model.to(device=device).eval()
     duration = (datetime.now() - start_time).total_seconds()
     print(f"Loaded {model_path} in {duration:.2f} seconds")
     return model
@@ -414,9 +429,9 @@ def run_inference(
     dtype: Optional[str] = None,
     seqlen: int = 512,
 ) -> None:
-    model = load_model(model_path, device)
-    if dtype is not None:
-        model.to(dtype=getattr(torch, dtype))
+    model = load_model(
+        model_path, device, getattr(torch, dtype) if dtype is not None else None
+    )
     tokenizer = Tokenizer(tokenizer_path)
     tokens = tokenizer.encode(prompt, bos=False, eos=False)
     x = torch.tensor(tokens, device=device).reshape(1, -1)
@@ -445,11 +460,7 @@ def benchmark(
     ) as prof:
         for idx, tok in enumerate(model.generate(x)):
             break
-    print(
-        prof.key_averages(group_by_input_shape=True).table(
-            sort_by="cpu_time_total"
-        )
-    )
+    print(prof.key_averages(group_by_input_shape=True).table(sort_by="cpu_time_total"))
 
 
 def parse_args():
