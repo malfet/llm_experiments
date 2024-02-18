@@ -387,9 +387,9 @@ def load_model(
     model_path: str, device: str, dtype: Optional[torch.dtype] = None
 ) -> nn.Module:
     start_time = datetime.now()
-    with default_dtype(dtype):
+    with default_dtype(dtype), torch.device(device):
         checkpoint_dict = torch.load(
-            model_path, map_location=device, weights_only=True, mmap=True
+            model_path, map_location="cpu", weights_only=True, mmap=True
         )
         if "model_args" in checkpoint_dict:
             model_args = checkpoint_dict["model_args"]
@@ -407,7 +407,6 @@ def load_model(
             if k.startswith(unwanted_prefix):
                 state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
         model.load_state_dict(state_dict, strict=False)
-        model.to(device=device).eval()
     duration = (datetime.now() - start_time).total_seconds()
     print(f"Loaded {model_path} in {duration:.2f} seconds")
     return model
