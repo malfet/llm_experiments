@@ -116,18 +116,11 @@ class Attention(nn.Module):
         model_parallel_size = 1
         self.n_local_heads = args.n_heads // model_parallel_size
         self.head_dim = args.dim // args.n_heads
-        # key, query, value projections for all heads, but in a batch
-        self.wqkv = nn.Linear(args.dim, 3 * args.n_heads * self.head_dim, bias=False)
+        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
         self.kv_cache = None
-        self._register_load_state_dict_pre_hook(self.load_hook)
-
-    def load_hook(self, state_dict, prefix, *args):
-        if prefix + "wq.weight" in state_dict:
-            wq = state_dict.pop(prefix + "wq.weight")
-            wk = state_dict.pop(prefix + "wk.weight")
-            wv = state_dict.pop(prefix + "wv.weight")
-            state_dict[prefix + "wqkv.weight"] = torch.cat([wq, wk, wv])
 
     def forward(
         self,
@@ -140,8 +133,7 @@ class Attention(nn.Module):
         bsz, seqlen, _ = x.shape
 
         # QKV
-        kv_size = self.n_local_heads * self.head_dim
-        xq, xk, xv = self.wqkv(x).split(kv_size, dim=-1)
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_heads, self.head_dim)
