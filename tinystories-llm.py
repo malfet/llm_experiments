@@ -219,11 +219,6 @@ class Transformer(nn.Module):
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
 
-        # share the unembedding parameters with the embedding parameters
-        self.tok_embeddings.weight = (
-            self.output.weight
-        )  # https://paperswithcode.com/method/weight-tying
-
         # Initialize caches
         freqs_cos, freqs_sin = precompute_freqs_cis(
             self.params.dim // self.params.n_heads, self.params.max_seq_len
