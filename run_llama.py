@@ -502,29 +502,74 @@ def default_dtype(dtype=None):
         torch.set_default_dtype(orig_dtype)
 
 
+def model_from_gguf(model_path: str) -> nn.Module:
+    gguf = GGUFReader(model_path)
+    model_arch = gguf.props["general.architecture"]
+    if model_arch != "llama":
+        raise RuntimeError(f"Unsupported model architecutre {model_arch}")
+    llama_args = ModelArgs(
+        dim=gguf.props["llama.embedding_length"],
+        n_heads=gguf.props["llama.attention.head_count"],
+        n_layers=gguf.props["llama.block_count"],
+        max_seq_len=gguf.props["llama.context_length"],
+    )
+
+    def gguf_to_model_name(name: str) -> str:
+        if name == "token_embd.weight":
+            return "tok_embeddings.weight"
+        if name == "output_norm.weight":
+            return "norm.weight"
+        if name.startswith("blk."):
+            blk, idx, suffix, weight = name.split(".")
+            suffix = {
+                "attn_q": "attention.wq",
+                "attn_k": "attention.wk",
+                "attn_v": "attention.wv",
+                "attn_output": "attention.wo",
+                "attn_norm": "attention_norm",
+                "ffn_up": "feed_forward.w1",
+                "ffn_down": "feed_forward.w2",
+                "ffn_gate": "feed_forward.w3",
+                "ffn_norm": "ffn_norm",
+            }[suffix]
+            return f"layers.{idx}.{suffix}.weight"
+        return name
+
+    state_dict = {gguf_to_model_name(k): v for (k, v) in gguf.tensors.items()}
+    return llama_args, state_dict
+
+
+def model_from_pth(model_path: str) -> nn.Module:
+    checkpoint_dict = torch.load(
+        model_path, map_location="cpu", weights_only=True, mmap=True
+    )
+    if "model_args" in checkpoint_dict:
+        model_args = checkpoint_dict["model_args"]
+        if "n_kv_heads" in model_args:
+            assert model_args["n_heads"] == model_args["n_kv_heads"]
+            del model_args["n_kv_heads"]
+        gptconf = ModelArgs(**model_args)
+        state_dict = checkpoint_dict["model"]
+    else:
+        gptconf = ModelArgs()
+        state_dict = checkpoint_dict
+    unwanted_prefix = "_orig_mod."
+    for k, v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+    return gptconf, state_dict
+
+
 def load_model(
     model_path: str, device: str, dtype: Optional[torch.dtype] = None
 ) -> nn.Module:
     start_time = datetime.now()
     with default_dtype(dtype), torch.device(device):
-        checkpoint_dict = torch.load(
-            model_path, map_location="cpu", weights_only=True, mmap=True
-        )
-        if "model_args" in checkpoint_dict:
-            model_args = checkpoint_dict["model_args"]
-            if "n_kv_heads" in model_args:
-                assert model_args["n_heads"] == model_args["n_kv_heads"]
-                del model_args["n_kv_heads"]
-            gptconf = ModelArgs(**model_args)
-            state_dict = checkpoint_dict["model"]
+        if model_path.endswith(".gguf"):
+            conf, state_dict = model_from_gguf(model_path)
         else:
-            gptconf = ModelArgs()
-            state_dict = checkpoint_dict
-        model = Transformer(gptconf)
-        unwanted_prefix = "_orig_mod."
-        for k, v in list(state_dict.items()):
-            if k.startswith(unwanted_prefix):
-                state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+            conf, state_dict = model_from_pth(model_path)
+        model = Transformer(conf)
         model.load_state_dict(state_dict, strict=False)
     duration = (datetime.now() - start_time).total_seconds()
     print(f"Loaded {model_path} in {duration:.2f} seconds")
