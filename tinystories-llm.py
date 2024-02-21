@@ -3,11 +3,13 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 # Self contained script that can be used to benchmark PyTorch inference speed
 
+import array
 import os
+import struct
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from urllib.request import urlopen
 
 import torch
@@ -365,6 +367,128 @@ def download_url(url: str) -> None:
         return
     with urlopen(url) as s, open(fname, "wb") as f:
         f.write(s.read())
+
+
+def get_file_size(name: str) -> int:
+    with open(name, "rb") as f:
+        return f.seek(0, 2)
+
+
+def untyped_storage_from_file(name: str) -> torch.storage.UntypedStorage:
+    return torch.storage.UntypedStorage.from_file(name, False, get_file_size(name))
+
+
+def tensor_from_storage(storage, dtype, offs, shape, strides=None) -> torch.Tensor:
+    rc = torch.tensor([], dtype=dtype)
+    if strides is None:
+        strides = []
+        prev = 1
+        for s in reversed(shape):
+            strides.insert(0, prev)
+            prev *= s
+    rc.set_(storage, offs, shape, strides)
+    return rc
+
+
+class SerializedReader:
+    def __init__(self, storage) -> None:
+        self.storage = storage
+        self.offs = 0
+
+    def _read_bytes(self, byte_length: int) -> bytes:
+        data = bytes(
+            array.array("B", self.storage[self.offs : self.offs + byte_length])
+        )
+        self.offs += byte_length
+        return data
+
+    def _read_int(self, byte_length: int, unsigned: bool) -> int:
+        fmt = "i" if byte_length == 4 else "l"
+        if unsigned:
+            fmt = fmt.upper()
+        return struct.unpack(fmt, self._read_bytes(byte_length))[0]
+
+    def read_int32(self) -> int:
+        return self._read_int(4, False)
+
+    def read_int64(self) -> int:
+        return self._read_int(8, False)
+
+    def read_float32(self) -> float:
+        return struct.unpack("f", self._read_bytes(4))[0]
+
+    def read_pascal_string(self) -> str:
+        strlen = self.read_int64()
+        rc = self._read_bytes(strlen)
+        return rc.decode("utf-8")
+
+    def read_typed_value(self, val_type: Optional[int] = None) -> Any:
+        if val_type is None:
+            val_type = self.read_int32()
+
+        if val_type == 9:  # GGUFValueType.ARRAY:
+            elem_type = self.read_int32()
+            array_len = self.read_int64()
+            rc = []
+            for _ in range(array_len):
+                rc.append(self.read_typed_value(elem_type))
+            return rc
+        elif val_type == 8:  # GGUFValueType.STRING:
+            return self.read_pascal_string()
+        elif val_type == 5:  # GGUFValueType.INT32:
+            return self.read_int32()
+        elif val_type == 4:  # GGUFValueType.UINT32:
+            return self._read_int(4, True)
+        elif val_type == 6:  # GGUFValueType.FLOAT32:
+            return self.read_float32()
+        raise RuntimeError(f"Unknown type {val_type}")
+
+
+class GGUFReader:
+    def __init__(self, filename) -> None:
+        self.storage = storage = untyped_storage_from_file(filename)
+        self.stream = stream = SerializedReader(storage)
+        self.props = {}
+        self.tensors = {}
+        magic = stream.read_int32()
+        if magic != 0x46554747:
+            raise RuntimeError(f"Unexpected magic number {magic}")
+        version = stream.read_int32()
+        if version not in [3]:
+            raise RuntimeError(f"Unsupported version {version}")
+        self.tensor_count = stream.read_int64()
+        self.kv_count = stream.read_int64()
+
+        for i in range(self.kv_count):
+            key = stream.read_pascal_string()
+            value = stream.read_typed_value()
+            self.props[key] = value
+
+        tensor_meta = []
+        for i in range(self.tensor_count):
+            key = stream.read_pascal_string()
+            ndim = stream.read_int32()
+            dims = list(reversed([stream.read_int64() for _ in range(ndim)]))
+            tensor_dtype = stream.read_int32()
+            tensor_offs = stream.read_int64()
+            tensor_meta.append((key, dims, tensor_dtype, tensor_offs))
+
+        self.alignment = self.props.get("general.alignment", 32)
+        if (padding := stream.offs % self.alignment) != 0:
+            stream.offs += self.alignment - padding
+
+        for key, shape, raw_dtype, offs in tensor_meta:
+            offs = offs + stream.offs
+            if raw_dtype == 0:
+                self.tensors[key] = tensor_from_storage(
+                    storage, torch.float32, offs // 4, shape
+                )
+            elif raw_dtype == 1:
+                self.tensors[key] = tensor_from_storage(
+                    storage, torch.float16, offs // 2, shape
+                )
+            else:
+                raise RuntimeError(f"Unknown tensor type {raw_dtype}")
 
 
 @contextmanager
