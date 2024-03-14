@@ -69,27 +69,36 @@ def plot_mv_perf(dtype=torch.float32):
     plt.show()
 
 
-if __name__ == "__main__":
-    torch.set_num_threads(1)
-    # m, n, k = 256, 288, 768
-    m, n, k = 1, 256, 768
-    device = "cpu"
+def benchmark_linalg(m: int = 1, n: int = 256, k: int = 768, device="cpu") -> None:
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
         rc = bench_mv(n, k, dtype, device=device, trans_a=False)
-        print("mv_nt", dtype, f"{rc.mean*1e6:.2f} usec")
+        print(f"mv_nt   {str(dtype):>14} {rc.mean*1e6:>7.2f} usec")
 
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
         rc = bench_mv(n, k, dtype, device=device, trans_a=True)
-        print("mv_ta", dtype, f"{rc.mean*1e6:.2f} usec")
+        print(f"mv_ta   {str(dtype):>14} {rc.mean*1e6:>7.2f} usec")
 
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
         rc = bench_mm(m, n, k, dtype, device=device)
-        print("notrans", dtype, f"{rc.mean*1e6:.2f} usec")
+        print(f"notrans {str(dtype):>14} {rc.mean*1e6:>7.2f} usec")
 
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
         rc = bench_mm(m, n, k, dtype, trans_a=True, device=device)
-        print("trans_a", dtype, f"{rc.mean*1e6:.2f} usec")
+        print(f"trans_a {str(dtype):>14} {rc.mean*1e6:>7.2f} usec")
 
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
         rc = bench_mm(m, n, k, dtype, trans_b=True, device=device)
-        print("trans_b", dtype, f"{rc.mean*1e6:.2f} usec")
+        print(f"trans_b {str(dtype):>14} {rc.mean*1e6:>7.2f} usec")
+
+
+if __name__ == "__main__":
+    torch.set_num_threads(1)
+    benchmark_linalg()
+    if hasattr(torch._C, "_set_cpu_allow_fp16_reduced_precision_reduction"):
+        prev = torch._C._get_cpu_allow_fp16_reduced_precision_reduction()
+        try:
+            torch._C._set_cpu_allow_fp16_reduced_precision_reduction(True)
+            print("\n\nUsing FP16 accumulation")
+            benchmark_linalg()
+        finally:
+            torch._C._set_cpu_allow_fp16_reduced_precision_reduction(prev)
