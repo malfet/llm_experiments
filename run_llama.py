@@ -626,6 +626,14 @@ if __name__ == "__main__":
     download_url(
         "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.pt"
     )
+
+    # Attempt to use reduced precision computations when possible
+    if hasattr(torch._C, "_set_cpu_allow_fp16_reduced_precision_reduction"):
+        try:
+            torch._C._set_cpu_allow_fp16_reduced_precision_reduction(True)
+        except RuntimeError:
+            print("Failed to set reduced precision computations")
+
     if args.benchmark:
         benchmark(device=args.device, dtype=args.dtype, model_path=args.model_path)
     else:
