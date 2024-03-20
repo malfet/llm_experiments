@@ -1,11 +1,11 @@
 # Benchmark torch.rand performance on varios platforms/dtypes
 # Against torch-2.2.0 for 4096x4096
-# |                  | float32 | float16  | bfloat16 |
-# | Apple M1         |         |          |          |
-# | Apple M2 Pro     | 50 msec | 137 msec | 50 msec  |
-# | AWS Tg4          |         |          |          |
-# | Xeon 8275CL@3Ghz |         |          |          |
-# | Xeon @2.2Ghz     |         |          |          |
+# |                  |  float32 | float16  | bfloat16 |
+# | Apple M1         |          |          |          |
+# | Apple M2 Pro     |  50 msec | 137 msec | 50 msec  |
+# | AWS Tg4          |          |          |          |
+# | Xeon 8275CL@3Ghz | 107 msec | 130 msec | 123 msec |
+# | Xeon @2.2Ghz     |          |          |          |
 
 from timeit import default_timer
 
