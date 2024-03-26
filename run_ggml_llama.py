@@ -8,6 +8,9 @@ def check_call(args) -> None:
 
     with Popen(args, stdout=PIPE, stderr=STDOUT) as p:
         print(p.stdout.read().decode("utf-8"))
+        p.communicate()
+        if p.returncode != 0:
+            raise RuntimeError("Process execution failed")
 
 
 def download_url(url: str) -> None:
