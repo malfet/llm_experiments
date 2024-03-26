@@ -1,5 +1,6 @@
 import os
 import sys
+from typing import Optional
 from urllib.request import urlopen
 
 
@@ -67,21 +68,26 @@ def convert_model(folder_name: str, model_name: str, dtype: str = "f32") -> None
 
 
 def run_inference_on_cpu(
-        folder_name: str, dtype: str = "f32", prompt: str = "Once upon a time", seq_len: int = 1024
+    folder_name: str,
+    dtype: str = "f32",
+    prompt: str = "Once upon a time",
+    seq_len: int = 1024,
+    seed: Optional[int] = None,
 ) -> None:
-    check_call(
-        [
-            f"{folder_name}/main",
-            "-m",
-            f"ggml-model-{dtype}.gguf",
-            "--prompt",
-            prompt,
-            "--n-predict",
-            str(seq_len),
-            "--n-gpu-layers",
-            "0",
-        ]
-    )
+    args = [
+        f"{folder_name}/main",
+        "-m",
+        f"ggml-model-{dtype}.gguf",
+        "--prompt",
+        prompt,
+        "--n-predict",
+        str(seq_len),
+        "--n-gpu-layers",
+        "0",
+    ]
+    if seed is not None:
+        args.extend(["-s", str(seed)])
+    check_call(args)
 
 
 def parse_args():
@@ -89,6 +95,7 @@ def parse_args():
 
     parser = ArgumentParser("Comple, convert and run llama.cpp")
     parser.add_argument("--model-path", type=str, default="stories15M.pt")
+    parser.add_argument("--random-seed", type=int, default=None)
     parser.add_argument("--llama-branch", type=str, default="b2074")
     parser.add_argument("--dtype", type=str, default="f32")
     parser.add_argument("--prompt", type=str, default="Once upon a time")
@@ -107,7 +114,13 @@ def main() -> None:
     clone_llama_cpp(folder_name=folder_name, branch=args.llama_branch)
     compile_llama_cpp(folder_name)
     convert_model(folder_name, args.model_path, dtype=args.dtype)
-    run_inference_on_cpu(folder_name, dtype=args.dtype, prompt=args.prompt, seq_len=args.seq_len)
+    run_inference_on_cpu(
+        folder_name,
+        dtype=args.dtype,
+        prompt=args.prompt,
+        seq_len=args.seq_len,
+        seed=args.random_seed,
+    )
 
 
 if __name__ == "__main__":
