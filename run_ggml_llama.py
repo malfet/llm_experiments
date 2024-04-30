@@ -22,7 +22,7 @@ def download_url(url: str) -> None:
         f.write(s.read())
 
 
-def clone_llama_cpp(folder_name: str, branch: str = "b2074") -> None:
+def clone_llama_cpp(folder_name: str, branch: str = "b2774") -> None:
     if os.path.exists(folder_name):
         return
     check_call(
