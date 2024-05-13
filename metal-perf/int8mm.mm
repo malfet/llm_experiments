@@ -122,9 +122,11 @@ int main() {
   @autoreleasepool {
     id<MTLDevice> device = getMetalDevice();
     std::cout << "Using device " << device.name.UTF8String << std::endl;
-    id<MTLLibrary> naive_int8mm =
-        compileLibraryFromFile(device, "naive_int8mm.metal");
+    auto naive_int8mm = compileLibraryFromFile(device, "naive_int8mm.metal");
+    auto vectorized_int8mm =
+        compileLibraryFromFile(device, "vectorized_int8mm.metal");
     benchmark_int8mm(naive_int8mm, "naive_int8mm", 1, 4096, 4096);
+    benchmark_int8mm(vectorized_int8mm, "vecorized_int8mm", 1, 4096, 4096);
   }
   return 0;
 }
