@@ -113,7 +113,7 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
     }
   };
   auto gflops = (M * N * K * 1e-9) / measure_time(200, do_compule);
-  std::cout << "Perf of " << lib_name << " is " << gflops << " GFLOPs"
+  std::cout << "Perf of " << lib_name << " dim " << M << "x" << N << "x" << K << " is " << gflops << " GFLOPs"
             << std::endl;
   return gflops;
 }
@@ -125,8 +125,8 @@ int main() {
     auto naive_int8mm = compileLibraryFromFile(device, "naive_int8mm.metal");
     auto vectorized_int8mm =
         compileLibraryFromFile(device, "vectorized_int8mm.metal");
-    benchmark_int8mm(naive_int8mm, "naive_int8mm", 1, 4096, 4096);
-    benchmark_int8mm(vectorized_int8mm, "vecorized_int8mm", 1, 4096, 4096);
+    benchmark_int8mm(naive_int8mm, "naive_int8mm", 32, 4096, 4096);
+    benchmark_int8mm(vectorized_int8mm, "vectorized_int8mm", 32, 4096, 4096);
   }
   return 0;
 }
