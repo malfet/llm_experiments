@@ -137,10 +137,9 @@ int main() {
     id<MTLDevice> device = getMetalDevice();
     std::cout << "Using device " << device.name.UTF8String << std::endl;
     auto naive_int8mm = compileLibraryFromFile(device, "naive_int8mm.metal");
-    auto vectorized_int8mm =
-        compileLibraryFromFile(device, "vectorized_int8mm.metal");
+    auto reduce_vec4_int8mm = compileLibraryFromFile(device, "reduce_vec4_int8mm.metal");
     benchmark_int8mm(naive_int8mm, "naive_int8mm", 32, 4096, 4096);
-    benchmark_int8mm(vectorized_int8mm, "vectorized_int8mm", 32, 4096, 4096);
+    benchmark_int8mm(reduce_vec4_int8mm, "reduce_vec4_int8mm", 32, 4096, 4096);
   }
   return 0;
 }
