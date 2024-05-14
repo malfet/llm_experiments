@@ -7,6 +7,9 @@
 #include <sstream>
 #include <stdlib.h>
 #include <string>
+#include <random>
+
+#include <arm_neon.h>
 
 void fail(const std::string &str) {
   std::cerr << str << std::endl;
@@ -21,8 +24,6 @@ void fail(const std::string &str1, const std::string &str2) {
 template <typename Callable>
 float measure_time(unsigned repeat_cnt, Callable c) {
   using namespace std::chrono;
-  // Warmup
-  c();
   auto start = high_resolution_clock::now();
   for (unsigned idx = 0; idx < repeat_cnt; idx++) {
     c();
@@ -97,6 +98,52 @@ struct Int8MMOpDescriptor {
         threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, M / groupM), 1, 1)];
     [encoder endEncoding];
   }
+  template<typename T>
+  void init() {
+    T *a_ptr = reinterpret_cast<T*>([buf_A contents]);
+    int8_t *b_ptr = reinterpret_cast<int8_t*>([buf_B contents]);
+    T *c_ptr = reinterpret_cast<T*>([buf_C contents]);
+    T *s_ptr = reinterpret_cast<T*>([buf_S contents]);
+    std::random_device rd;
+    std::mt19937 generator(rd());
+    std::uniform_int_distribution<> int_distrib(-32, 32);
+    std::uniform_real_distribution<> real_distrib(-1.0, 1.0);
+    for(unsigned idx = 0; idx < M * K; ++idx) {
+       a_ptr[idx] = real_distrib(generator);
+    }
+   for(unsigned idx = 0; idx < N * K; ++idx) {
+       b_ptr[idx] = int_distrib(generator);
+    }
+    for(unsigned idx = 0; idx < N; ++idx) {
+      s_ptr[idx] = (idx + 1.0) / N;
+    }
+    for(unsigned idx = 0; idx < M * N; ++idx) {
+      c_ptr[idx] = -1.0;
+    }
+  }
+  template<typename T>
+  bool validate() {
+     T *a_ptr = reinterpret_cast<T*>([buf_A contents]);
+     int8_t *b_ptr = reinterpret_cast<int8_t*>([buf_B contents]);
+     T *c_ptr = reinterpret_cast<T*>([buf_C contents]);
+     T *s_ptr = reinterpret_cast<T*>([buf_S contents]);
+    for(unsigned m = 0; m < M; m++) {
+      for(unsigned n = 0; n < N; n++) {
+        float expected = float(c_ptr[m * N + n]);
+        float rc = 0.0;
+        for(unsigned k = 0; k < K; k++) {
+          rc += float(b_ptr[n * K + k])*float(a_ptr[m * K + k]);
+        }
+        rc *= s_ptr[n];
+        auto rtol = std::abs(rc - expected) / (std::abs(expected) + 1e-6);
+        if (rtol > 5e-3) {
+            std::cerr << "Result " << expected << " vs expected " << rc << std::endl;
+            return false;
+        }
+      }
+    }
+    return true;
+  }
   unsigned M, N, K;
   id<MTLBuffer> buf_A; // MxK elements
   id<MTLBuffer> buf_B; // NxK elements
@@ -107,7 +154,8 @@ struct Int8MMOpDescriptor {
 float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
                        unsigned M, unsigned N, unsigned K) {
   Int8MMOpDescriptor op_desc(lib.device, M, N, K);
-  id<MTLFunction> func = [lib newFunctionWithName:@"int8pack_mm_bfloat"];
+  op_desc.init<float16_t>();
+  id<MTLFunction> func = [lib newFunctionWithName:@"int8pack_mm_half"];
   if (func == nil) {
     fail("Can:t get function");
   }
@@ -126,6 +174,12 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
       [cmdBuffer waitUntilCompleted];
     }
   };
+
+  // Validate
+  do_compule();
+  if (!op_desc.validate<float16_t>()) {
+    fail("Failed to validate" +  lib_name);
+  }
   auto gflops = (M * N * K * 1e-9) / measure_time(200, do_compule);
   std::cout << "Perf of " << lib_name << " dim " << M << "x" << N << "x" << K << " is " << gflops << " GFLOPs"
             << std::endl;
