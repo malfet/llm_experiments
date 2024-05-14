@@ -166,7 +166,7 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
     fail("Failed to construct pipeline state: ", error.description.UTF8String);
   }
   id<MTLCommandQueue> queue = [lib.device newCommandQueue];
-  auto do_compule = ^() {
+  auto do_compute = ^() {
     @autoreleasepool {
       id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
       op_desc.encodeNaiveMM(cmdBuffer, cpl);
@@ -176,11 +176,11 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
   };
 
   // Validate
-  do_compule();
+  do_compute();
   if (!op_desc.validate<float16_t>()) {
     fail("Failed to validate" +  lib_name);
   }
-  auto gflops = (M * N * K * 1e-9) / measure_time(200, do_compule);
+  auto gflops = (M * N * K * 1e-9) / measure_time(200, do_compute);
   std::cout << "Perf of " << lib_name << " dim " << M << "x" << N << "x" << K << " is " << gflops << " GFLOPs"
             << std::endl;
   return gflops;
