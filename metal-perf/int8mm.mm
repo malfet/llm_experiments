@@ -72,12 +72,41 @@ id<MTLBuffer> allocSharedBuffer(id<MTLDevice> device, unsigned length) {
   return rc;
 }
 
+
+struct Int8MMOpDescriptor {
+  Int8MMOpDescriptor(id<MTLDevice> device, unsigned M_, unsigned N_, unsigned K_, unsigned elem_size = 2):M(M_), N(N_), K(K_) {
+    buf_A = allocSharedBuffer(device, M * K * elem_size);
+    buf_B = allocSharedBuffer(device, N * K);
+    buf_C = allocSharedBuffer(device, M * N * elem_size);
+    buf_S = allocSharedBuffer(device, N * elem_size);
+  }
+  void encodeNaiveMM(id<MTLCommandBuffer> cmdBuffer, id<MTLComputePipelineState> cpl, unsigned groupM = 1) const {
+    id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+    std::vector<unsigned> sizes = {M, N, K, 0};
+    const auto maxThreadsPerGroup =
+        static_cast<decltype(M)>([cpl maxTotalThreadsPerThreadgroup]);
+    [encoder setComputePipelineState:cpl];
+    [encoder setBuffer:buf_A offset:0 atIndex:0];
+    [encoder setBuffer:buf_B offset:0 atIndex:1];
+    [encoder setBuffer:buf_S offset:0 atIndex:2];
+    [encoder setBuffer:buf_C offset:0 atIndex:3];
+    [encoder setBytes:sizes.data()
+               length:sizeof(uint32_t) * sizes.size()
+              atIndex:4];
+    [encoder dispatchThreads:MTLSizeMake(N, M / groupM, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, M / groupM), 1, 1)];
+    [encoder endEncoding];
+  }
+  unsigned M, N, K;
+  id<MTLBuffer> buf_A; // MxK elements
+  id<MTLBuffer> buf_B; // NxK elements
+  id<MTLBuffer> buf_C; // MxN elements
+  id<MTLBuffer> buf_S; // N elements
+};
+
 float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
                        unsigned M, unsigned N, unsigned K) {
-  auto buf_A = allocSharedBuffer(lib.device, M * K * 2);
-  auto buf_B = allocSharedBuffer(lib.device, N * K);
-  auto buf_C = allocSharedBuffer(lib.device, M * N * 2);
-  auto buf_S = allocSharedBuffer(lib.device, N * 2);
+  Int8MMOpDescriptor op_desc(lib.device, M, N, K);
   id<MTLFunction> func = [lib newFunctionWithName:@"int8pack_mm_bfloat"];
   if (func == nil) {
     fail("Can:t get function");
@@ -88,26 +117,11 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
   if (cpl == nil) {
     fail("Failed to construct pipeline state: ", error.description.UTF8String);
   }
-  std::vector<unsigned> sizes = {M, N, K, 0};
-  const auto maxThreadsPerGroup =
-      static_cast<decltype(M)>([cpl maxTotalThreadsPerThreadgroup]);
   id<MTLCommandQueue> queue = [lib.device newCommandQueue];
   auto do_compule = ^() {
     @autoreleasepool {
       id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
-      id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
-      [encoder setComputePipelineState:cpl];
-      [encoder setBuffer:buf_A offset:0 atIndex:0];
-      [encoder setBuffer:buf_B offset:0 atIndex:1];
-      [encoder setBuffer:buf_S offset:0 atIndex:2];
-      [encoder setBuffer:buf_C offset:0 atIndex:3];
-      [encoder setBytes:sizes.data()
-                 length:sizeof(uint32_t) * sizes.size()
-                atIndex:4];
-      [encoder dispatchThreads:MTLSizeMake(N, M, 1)
-          threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, M), 1,
-                                            1)];
-      [encoder endEncoding];
+      op_desc.encodeNaiveMM(cmdBuffer, cpl);
       [cmdBuffer commit];
       [cmdBuffer waitUntilCompleted];
     }
