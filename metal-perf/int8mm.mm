@@ -187,13 +187,15 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
 }
 
 int main() {
+  unsigned M, N, K;
+  std::tie(M, N, K) = std::make_tuple(32, 4096, 4096);
   @autoreleasepool {
     id<MTLDevice> device = getMetalDevice();
     std::cout << "Using device " << device.name.UTF8String << std::endl;
     auto naive_int8mm = compileLibraryFromFile(device, "naive_int8mm.metal");
     auto reduce_vec4_int8mm = compileLibraryFromFile(device, "reduce_vec4_int8mm.metal");
-    benchmark_int8mm(naive_int8mm, "naive_int8mm", 32, 4096, 4096);
-    benchmark_int8mm(reduce_vec4_int8mm, "reduce_vec4_int8mm", 32, 4096, 4096);
+    benchmark_int8mm(naive_int8mm, "naive_int8mm", M, N, K);
+    benchmark_int8mm(reduce_vec4_int8mm, "reduce_vec4_int8mm", M, N, K);
   }
   return 0;
 }
