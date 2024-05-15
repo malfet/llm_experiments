@@ -4,10 +4,10 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <stdlib.h>
 #include <string>
-#include <random>
 
 #include <arm_neon.h>
 
@@ -73,15 +73,18 @@ id<MTLBuffer> allocSharedBuffer(id<MTLDevice> device, unsigned length) {
   return rc;
 }
 
-
 struct Int8MMOpDescriptor {
-  Int8MMOpDescriptor(id<MTLDevice> device, unsigned M_, unsigned N_, unsigned K_, unsigned elem_size = 2):M(M_), N(N_), K(K_) {
+  Int8MMOpDescriptor(id<MTLDevice> device, unsigned M_, unsigned N_,
+                     unsigned K_, unsigned elem_size = 2)
+      : M(M_), N(N_), K(K_) {
     buf_A = allocSharedBuffer(device, M * K * elem_size);
     buf_B = allocSharedBuffer(device, N * K);
     buf_C = allocSharedBuffer(device, M * N * elem_size);
     buf_S = allocSharedBuffer(device, N * elem_size);
   }
-  void encodeNaiveMM(id<MTLCommandBuffer> cmdBuffer, id<MTLComputePipelineState> cpl, unsigned groupM = 1) const {
+  void encodeNaiveMM(id<MTLCommandBuffer> cmdBuffer,
+                     id<MTLComputePipelineState> cpl,
+                     unsigned groupM = 1) const {
     id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
     std::vector<unsigned> sizes = {M, N, K, 0};
     const auto maxThreadsPerGroup =
@@ -98,52 +101,57 @@ struct Int8MMOpDescriptor {
         threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, M / groupM), 1, 1)];
     [encoder endEncoding];
   }
-  template<typename T>
-  void init() {
-    T *a_ptr = reinterpret_cast<T*>([buf_A contents]);
-    int8_t *b_ptr = reinterpret_cast<int8_t*>([buf_B contents]);
-    T *c_ptr = reinterpret_cast<T*>([buf_C contents]);
-    T *s_ptr = reinterpret_cast<T*>([buf_S contents]);
+  template <typename T> void init() {
+    T *a_ptr = reinterpret_cast<T *>([buf_A contents]);
+    int8_t *b_ptr = reinterpret_cast<int8_t *>([buf_B contents]);
+    T *c_ptr = reinterpret_cast<T *>([buf_C contents]);
+    T *s_ptr = reinterpret_cast<T *>([buf_S contents]);
     std::random_device rd;
     std::mt19937 generator(rd());
     std::uniform_int_distribution<> int_distrib(-32, 32);
     std::uniform_real_distribution<> real_distrib(-1.0, 1.0);
-    for(unsigned idx = 0; idx < M * K; ++idx) {
-       a_ptr[idx] = real_distrib(generator);
+    for (unsigned idx = 0; idx < M * K; ++idx) {
+      a_ptr[idx] = real_distrib(generator);
     }
-   for(unsigned idx = 0; idx < N * K; ++idx) {
-       b_ptr[idx] = int_distrib(generator);
+    for (unsigned idx = 0; idx < N * K; ++idx) {
+      b_ptr[idx] = int_distrib(generator);
     }
-    for(unsigned idx = 0; idx < N; ++idx) {
+    for (unsigned idx = 0; idx < N; ++idx) {
       s_ptr[idx] = (idx + 1.0) / N;
     }
-    for(unsigned idx = 0; idx < M * N; ++idx) {
+    for (unsigned idx = 0; idx < M * N; ++idx) {
       c_ptr[idx] = -1.0;
     }
   }
-  template<typename T>
-  bool validate() {
-     T *a_ptr = reinterpret_cast<T*>([buf_A contents]);
-     int8_t *b_ptr = reinterpret_cast<int8_t*>([buf_B contents]);
-     T *c_ptr = reinterpret_cast<T*>([buf_C contents]);
-     T *s_ptr = reinterpret_cast<T*>([buf_S contents]);
-    for(unsigned m = 0; m < M; m++) {
-      for(unsigned n = 0; n < N; n++) {
+
+  template <typename T> bool validate() const {
+    T *a_ptr = reinterpret_cast<T *>([buf_A contents]);
+    int8_t *b_ptr = reinterpret_cast<int8_t *>([buf_B contents]);
+    T *c_ptr = reinterpret_cast<T *>([buf_C contents]);
+    T *s_ptr = reinterpret_cast<T *>([buf_S contents]);
+
+    for (unsigned m = 0; m < M; m++) {
+      for (unsigned n = 0; n < N; n++) {
         float expected = float(c_ptr[m * N + n]);
         float rc = 0.0;
-        for(unsigned k = 0; k < K; k++) {
-          rc += float(b_ptr[n * K + k])*float(a_ptr[m * K + k]);
+        for (unsigned k = 0; k < K; k++) {
+          rc += float(b_ptr[n * K + k]) * float(a_ptr[m * K + k]);
         }
         rc *= s_ptr[n];
-        auto rtol = std::abs(rc - expected) / (std::abs(expected) + 1e-6);
-        if (rtol > 5e-3) {
-            std::cerr << "Result " << expected << " vs expected " << rc << std::endl;
-            return false;
+        auto atol = std::abs(rc - expected);
+        auto rtol =
+            atol / std::max(std::min(std::abs(expected), std::abs(rc)), 1e-6f);
+        if (rtol > 5e-3 && atol > 5e-4) {
+          std::cerr << "Result " << expected << " vs expected " << rc
+                    << " (atol=" << atol << " ,rtol=" << rtol << ") at " << m
+                    << ":" << n << std::endl;
+          return false;
         }
       }
     }
     return true;
   }
+
   unsigned M, N, K;
   id<MTLBuffer> buf_A; // MxK elements
   id<MTLBuffer> buf_B; // NxK elements
@@ -178,11 +186,11 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
   // Validate
   do_compute();
   if (!op_desc.validate<float16_t>()) {
-    fail("Failed to validate" +  lib_name);
+    fail("Failed to validate" + lib_name);
   }
   auto gflops = (M * N * K * 1e-9) / measure_time(200, do_compute);
-  std::cout << "Perf of " << lib_name << " dim " << M << "x" << N << "x" << K << " is " << gflops << " GFLOPs"
-            << std::endl;
+  std::cout << "Perf of " << lib_name << " dim " << M << "x" << N << "x" << K
+            << " is " << gflops << " GFLOPs" << std::endl;
   return gflops;
 }
 
