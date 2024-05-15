@@ -86,7 +86,7 @@ struct Int8MMOpDescriptor {
                      id<MTLComputePipelineState> cpl,
                      unsigned groupM = 1) const {
     id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
-    std::vector<unsigned> sizes = {M, N, K, 0};
+    std::vector<unsigned> sizes = {M, K, N, 0};
     const auto maxThreadsPerGroup =
         static_cast<decltype(M)>([cpl maxTotalThreadsPerThreadgroup]);
     [encoder setComputePipelineState:cpl];
@@ -196,7 +196,7 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
 
 int main() {
   unsigned M, N, K;
-  std::tie(M, N, K) = std::make_tuple(32, 4096, 4096);
+  std::tie(M, N, K) = std::make_tuple(32, 4128, 4096);
   @autoreleasepool {
     id<MTLDevice> device = getMetalDevice();
     std::cout << "Using device " << device.name.UTF8String << std::endl;
