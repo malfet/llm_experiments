@@ -101,6 +101,23 @@ struct Int8MMOpDescriptor {
         threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, M / groupM), 1, 1)];
     [encoder endEncoding];
   }
+
+  void encodeBlockMM(id<MTLCommandBuffer> cmdBuffer, id<MTLComputePipelineState> cpl, unsigned blockSize = 8) const {
+    id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+    std::vector<unsigned> sizes = {M, K, N, 0};
+    [encoder setComputePipelineState:cpl];
+    [encoder setBuffer:buf_A offset:0 atIndex:0];
+    [encoder setBuffer:buf_B offset:0 atIndex:1];
+    [encoder setBuffer:buf_S offset:0 atIndex:2];
+    [encoder setBuffer:buf_C offset:0 atIndex:3];
+    [encoder setBytes:sizes.data()
+               length:sizeof(uint32_t) * sizes.size()
+              atIndex:4];
+    [encoder dispatchThreads:MTLSizeMake(M * N / 4, blockSize, 1)
+        threadsPerThreadgroup:MTLSizeMake(blockSize, blockSize, 1)];
+    [encoder endEncoding];
+  }
+
   template <typename T> void init() {
     T *a_ptr = reinterpret_cast<T *>([buf_A contents]);
     int8_t *b_ptr = reinterpret_cast<int8_t *>([buf_B contents]);
@@ -110,6 +127,7 @@ struct Int8MMOpDescriptor {
     std::mt19937 generator(rd());
     std::uniform_int_distribution<> int_distrib(-32, 32);
     std::uniform_real_distribution<> real_distrib(-1.0, 1.0);
+
     for (unsigned idx = 0; idx < M * K; ++idx) {
       a_ptr[idx] = real_distrib(generator);
     }
@@ -124,7 +142,7 @@ struct Int8MMOpDescriptor {
     }
   }
 
-  template <typename T> bool validate() const {
+  template <typename T> bool validate(float atol_lim = 5e-4, float rtol_lim = 5e-3) const {
     T *a_ptr = reinterpret_cast<T *>([buf_A contents]);
     int8_t *b_ptr = reinterpret_cast<int8_t *>([buf_B contents]);
     T *c_ptr = reinterpret_cast<T *>([buf_C contents]);
@@ -141,7 +159,7 @@ struct Int8MMOpDescriptor {
         auto atol = std::abs(rc - expected);
         auto rtol =
             atol / std::max(std::min(std::abs(expected), std::abs(rc)), 1e-6f);
-        if (rtol > 5e-3 && atol > 5e-4) {
+        if (rtol >  rtol_lim && atol > atol_lim) {
           std::cerr << "Result " << expected << " vs expected " << rc
                     << " (atol=" << atol << " ,rtol=" << rtol << ") at " << m
                     << ":" << n << std::endl;
@@ -160,7 +178,7 @@ struct Int8MMOpDescriptor {
 };
 
 float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
-                       unsigned M, unsigned N, unsigned K) {
+                       unsigned M, unsigned N, unsigned K, bool use_block = false) {
   Int8MMOpDescriptor op_desc(lib.device, M, N, K);
   op_desc.init<float16_t>();
   id<MTLFunction> func = [lib newFunctionWithName:@"int8pack_mm_half"];
@@ -177,7 +195,10 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
   auto do_compute = ^() {
     @autoreleasepool {
       id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
-      op_desc.encodeNaiveMM(cmdBuffer, cpl);
+      if (use_block)
+        op_desc.encodeBlockMM(cmdBuffer, cpl);
+      else
+        op_desc.encodeNaiveMM(cmdBuffer, cpl);
       [cmdBuffer commit];
       [cmdBuffer waitUntilCompleted];
     }
@@ -212,8 +233,10 @@ int main() {
     std::cout << "Using device " << device.name.UTF8String << std::endl;
     auto naive_int8mm = compileLibraryFromFile(device, "naive_int8mm.metal");
     auto reduce_vec4_int8mm = compileLibraryFromFile(device, "reduce_vec4_int8mm.metal");
+    auto reduce_group_int8mm = compileLibraryFromFile(device, "reduce_group_int8mm.metal");
     benchmark_int8mm(naive_int8mm, "naive_int8mm", M, N, K);
     benchmark_int8mm(reduce_vec4_int8mm, "reduce_vec4_int8mm", M, N, K);
+    benchmark_int8mm(reduce_group_int8mm, "reduce_group_int8mm", M, N, K, true);
   }
   return 0;
 }
