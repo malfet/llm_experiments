@@ -9,8 +9,6 @@
 #include <stdlib.h>
 #include <string>
 
-#include <arm_neon.h>
-
 void fail(const std::string &str) {
   std::cerr << str << std::endl;
   abort();
@@ -72,6 +70,22 @@ id<MTLBuffer> allocSharedBuffer(id<MTLDevice> device, unsigned length) {
   }
   return rc;
 }
+
+
+inline uint32_t float_as_int(float f) {
+   union { float f; uint32_t i;} x; x.f = f; return x.i;
+}
+
+inline float int_as_float(uint32_t i) {
+   union { float f; uint32_t i;} x; x.i = i; return x.f;
+}
+
+struct BFloat16 {
+  BFloat16(float x): val(float_as_int(x)>>16) {}
+  operator float() const { return int_as_float(val << 16); }
+
+  uint16_t val;
+};
 
 struct Int8MMOpDescriptor {
   Int8MMOpDescriptor(id<MTLDevice> device, unsigned M_, unsigned N_,
@@ -180,8 +194,8 @@ struct Int8MMOpDescriptor {
 float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
                        unsigned M, unsigned N, unsigned K, bool use_block = false) {
   Int8MMOpDescriptor op_desc(lib.device, M, N, K);
-  op_desc.init<float16_t>();
-  id<MTLFunction> func = [lib newFunctionWithName:@"int8pack_mm_half"];
+  op_desc.init<BFloat16>();
+  id<MTLFunction> func = [lib newFunctionWithName:@"int8pack_mm_bfloat"];
   if (func == nil) {
     fail("Can:t get function");
   }
@@ -216,7 +230,7 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
 
   [captureManager stopCapture];
 
-  if (!op_desc.validate<float16_t>()) {
+  if (!op_desc.validate<BFloat16>()) {
     fail("Failed to validate" + lib_name);
   }
   auto gflops = (M * N * K * 1e-9) / measure_time(200, do_compute);
