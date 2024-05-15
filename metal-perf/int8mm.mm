@@ -183,8 +183,18 @@ float benchmark_int8mm(id<MTLLibrary> lib, const std::string &lib_name,
     }
   };
 
-  // Validate
+  // Validate (and capture trace if needed)
+  auto captureManager = [MTLCaptureManager sharedCaptureManager];
+  auto captureDescriptor = [MTLCaptureDescriptor new];
+  captureDescriptor.captureObject = queue;
+  captureDescriptor.destination = MTLCaptureDestinationGPUTraceDocument;
+  captureDescriptor.outputURL = [NSURL fileURLWithPath:[NSString stringWithFormat:@"%s.gputrace", lib_name.c_str()]];
+  [captureManager startCaptureWithDescriptor:captureDescriptor error:nil];
+
   do_compute();
+
+  [captureManager stopCapture];
+
   if (!op_desc.validate<float16_t>()) {
     fail("Failed to validate" + lib_name);
   }
