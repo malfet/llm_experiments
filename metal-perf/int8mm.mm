@@ -96,6 +96,7 @@ struct BFloat16 {
 
   uint16_t val;
 };
+using Float16 = _Float16;
 
 struct Int8MMOpDescriptor {
   Int8MMOpDescriptor(id<MTLDevice> device, const std::string &lib_name_,
@@ -188,8 +189,62 @@ struct Int8MMOpDescriptor {
     return true;
   }
 
+  template <typename T> float benchmark() {
+    init<T>();
+    id<MTLFunction> func = [lib
+        newFunctionWithName:[NSString
+                                stringWithFormat:@"int8pack_mm_%s",
+                                                 type_string<T>().c_str()]];
+    if (func == nil) {
+      fail("Can:t get function");
+    }
+    NSError *error = nil;
+    auto cpl = [lib.device newComputePipelineStateWithFunction:func
+                                                         error:&error];
+    if (cpl == nil) {
+      fail("Failed to construct pipeline state: ",
+           error.description.UTF8String);
+    }
+    id<MTLCommandQueue> queue = [lib.device newCommandQueue];
+    auto do_compute = ^() {
+      @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
+        encodeMM(cmdBuffer, cpl);
+        [cmdBuffer commit];
+        [cmdBuffer waitUntilCompleted];
+      }
+    };
+
+    // Validate (and capture trace if needed)
+    auto captureManager = [MTLCaptureManager sharedCaptureManager];
+    auto captureDescriptor = [MTLCaptureDescriptor new];
+    captureDescriptor.captureObject = queue;
+    captureDescriptor.destination = MTLCaptureDestinationGPUTraceDocument;
+    captureDescriptor.outputURL =
+        [NSURL fileURLWithPath:[NSString stringWithFormat:@"%s.gputrace",
+                                                          lib_name.c_str()]];
+    [captureManager startCaptureWithDescriptor:captureDescriptor error:nil];
+
+    do_compute();
+
+    [captureManager stopCapture];
+
+    if (!validate<T>()) {
+      fail("Failed to validate" + lib_name);
+    }
+    auto gflops = (M * N * K * 1e-9) / measure_time(200, do_compute);
+    std::cout << "Perf of " << lib_name << " type " << type_string<T>()
+              << " dim " << M << "x" << N << "x" << K << " is " << gflops
+              << " GFLOPs" << std::endl;
+    return gflops;
+  }
+
 private:
-  void allocBuffers(id<MTLDevice> device, const unsigned elem_size = 2) {
+  template <typename T> std::string type_string() const;
+  template <> std::string type_string<BFloat16>() const { return "bfloat"; }
+  template <> std::string type_string<float>() const { return "float"; }
+  template <> std::string type_string<Float16>() const { return "half"; }
+  void allocBuffers(id<MTLDevice> device, const unsigned elem_size = 4) {
     buf_A = allocSharedBuffer(device, M * K * elem_size);
     buf_B = allocSharedBuffer(device, N * K);
     buf_C = allocSharedBuffer(device, M * N * elem_size);
@@ -219,55 +274,6 @@ struct Int8MMBlockOpDesciptor : public Int8MMOpDescriptor {
   }
 };
 
-float benchmark_int8mm(Int8MMOpDescriptor &op_desc) {
-  op_desc.init<BFloat16>();
-  id<MTLFunction> func =
-      [op_desc.lib newFunctionWithName:@"int8pack_mm_bfloat"];
-  if (func == nil) {
-    fail("Can:t get function");
-  }
-  NSError *error = nil;
-  id<MTLComputePipelineState> cpl =
-      [op_desc.lib.device newComputePipelineStateWithFunction:func
-                                                        error:&error];
-  if (cpl == nil) {
-    fail("Failed to construct pipeline state: ", error.description.UTF8String);
-  }
-  id<MTLCommandQueue> queue = [op_desc.lib.device newCommandQueue];
-  auto do_compute = ^() {
-    @autoreleasepool {
-      id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
-      op_desc.encodeMM(cmdBuffer, cpl);
-      [cmdBuffer commit];
-      [cmdBuffer waitUntilCompleted];
-    }
-  };
-
-  // Validate (and capture trace if needed)
-  auto captureManager = [MTLCaptureManager sharedCaptureManager];
-  auto captureDescriptor = [MTLCaptureDescriptor new];
-  captureDescriptor.captureObject = queue;
-  captureDescriptor.destination = MTLCaptureDestinationGPUTraceDocument;
-  captureDescriptor.outputURL = [NSURL
-      fileURLWithPath:[NSString stringWithFormat:@"%s.gputrace",
-                                                 op_desc.lib_name.c_str()]];
-  [captureManager startCaptureWithDescriptor:captureDescriptor error:nil];
-
-  do_compute();
-
-  [captureManager stopCapture];
-
-  if (!op_desc.validate<BFloat16>()) {
-    fail("Failed to validate" + op_desc.lib_name);
-  }
-  auto gflops = (op_desc.M * op_desc.N * op_desc.K * 1e-9) /
-                measure_time(200, do_compute);
-  std::cout << "Perf of " << op_desc.lib_name << " dim " << op_desc.M << "x"
-            << op_desc.N << "x" << op_desc.K << " is " << gflops << " GFLOPs"
-            << std::endl;
-  return gflops;
-}
-
 int main() {
   unsigned M, N, K;
   std::tie(M, N, K) = std::make_tuple(32, 4128, 4096);
@@ -279,9 +285,9 @@ int main() {
                                           K);
     Int8MMBlockOpDesciptor reduce_group_int8mm(device, "reduce_group_int8mm", M,
                                                N, K);
-    benchmark_int8mm(naive_int8mm);
-    benchmark_int8mm(reduce_vec4_int8mm);
-    benchmark_int8mm(reduce_group_int8mm);
+    reduce_vec4_int8mm.benchmark<BFloat16>();
+    reduce_group_int8mm.benchmark<BFloat16>();
+    naive_int8mm.benchmark<BFloat16>();
   }
   return 0;
 }
