@@ -291,8 +291,11 @@ int main() {
     id<MTLDevice> device = getMetalDevice();
     std::cout << "Using device " << device.name.UTF8String << std::endl;
     Int4MMOpDescriptor<groupSize> naive_int4mm(device, "naive_int4mm", M, N, K);
+    Int4MMOpDescriptor<groupSize> reduce_vec4_int4mm(device, "reduce_vec4_int4mm", M, N,
+                                          K);
 
     // Benchmarks
+    reduce_vec4_int4mm.benchmark<BFloat16>();
     naive_int4mm.benchmark<BFloat16>();
   }
   return 0;
