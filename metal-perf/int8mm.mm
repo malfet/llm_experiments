@@ -293,8 +293,12 @@ struct Int8MMMat4OpDescriptor : public Int8MMOpDescriptor {
   using Int8MMOpDescriptor::Int8MMOpDescriptor;
   void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
                        unsigned maxThreadsPerGroup) const override {
+    constexpr auto blockSize = 8;
+    if (maxThreadsPerGroup < blockSize * blockSize) {
+      throw std::runtime_error("Can't dispatch!");
+    }
     [encoder dispatchThreads:MTLSizeMake(N/4, M, 1)
-        threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, N/4), 1, 1)];
+        threadsPerThreadgroup:MTLSizeMake(blockSize, blockSize, 1)];
   }
 };
 
@@ -302,8 +306,12 @@ struct Int8MMMat4xMat4OpDescriptor : public Int8MMOpDescriptor {
   using Int8MMOpDescriptor::Int8MMOpDescriptor;
   void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
                        unsigned maxThreadsPerGroup) const override {
+    constexpr auto blockSize = 8;
+    if (maxThreadsPerGroup < blockSize * blockSize) {
+      throw std::runtime_error("Can't dispatch!");
+    }
     [encoder dispatchThreads:MTLSizeMake(N/4, M/4, 1)
-        threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, N/4), 1, 1)];
+        threadsPerThreadgroup:MTLSizeMake(blockSize, blockSize, 1)];
   }
 };
 
