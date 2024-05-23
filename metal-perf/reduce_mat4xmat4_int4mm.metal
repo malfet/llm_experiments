@@ -58,6 +58,9 @@ kernel void int4pack_mm(
       const T scale3 = scalesAndZeros[(kb * N + 4 * n + 3) * 2 + 0];
       const T zero3 = scalesAndZeros[(kb * N + 4 * n + 3) * 2 + 1] - scale3 * T(8);
 
+      const float4 scales = float4(scale0, scale1, scale2, scale3);
+      const float4 zeros = float4(zero0, zero1, zero2, zero3);
+
       for(uint idx = 0; idx < groupSize && k < K; idx += 4, k += 4) {
         float4x4 a_mat;
         for(int j = 0; j < 4; ++j) {
@@ -69,11 +72,11 @@ kernel void int4pack_mm(
           uchar b_val0 = B_ptr[((k + j) * ldb + ((4 * n) % 32))/2];
           uchar b_val1 = B_ptr[((k + j) * ldb + ((4 * n) % 32))/2 + 1];
 
-          t_b_mat[j] = float4(
-            scale0 * float(b_val0 & 0x0f) + zero0,
-            scale1 * float(b_val0 >> 4) + zero1,
-            scale2 * float(b_val1 & 0x0f) + zero2,
-            scale3 * float(b_val1 >> 4) + zero3);
+          t_b_mat[j] = scales * float4(
+            float(b_val0 & 0x0f),
+            float(b_val0 >> 4),
+            float(b_val1 & 0x0f),
+            float(b_val1 >> 4)) + zeros;
         }
 
         rc += t_b_mat * a_mat;
