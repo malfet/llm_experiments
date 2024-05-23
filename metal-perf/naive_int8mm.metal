@@ -21,7 +21,7 @@ kernel void int8pack_mm(constant T *A [[buffer(0)]],
     const auto b_val = float(B_ptr[k]);
     rc += a_val * b_val;
   }
-  outputData[m * sizes.z + n] = T(rc * float(scales[n]));
+  outputData[m * ldc + n] = T(rc * float(scales[n]));
 }
 
 #define INSTANTIATE_INT8MM(DTYPE)                                              \

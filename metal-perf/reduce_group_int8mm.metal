@@ -22,7 +22,7 @@ kernel void
 int8pack_mm(constant T *A [[buffer(0)]], constant char *B [[buffer(1)]],
             constant T *scales [[buffer(2)]],
             device T *outputData [[buffer(3)]],
-            constant int3 &sizes [[buffer(4)]],
+            constant uint3 &sizes [[buffer(4)]],
             uint2 group_index [[threadgroup_position_in_grid]],
             uint2 threadgroup_index [[thread_position_in_threadgroup]]) {
   using vecT = typename Vec4Type<T>::type;
@@ -52,7 +52,7 @@ int8pack_mm(constant T *A [[buffer(0)]], constant char *B [[buffer(1)]],
   tgp_memory[threadgroup_index.x][threadgroup_index.y] = rc;
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (threadgroup_index.y == 0) {
-    for (int i = 1; i < blockSize; i++) {
+    for (unsigned i = 1; i < blockSize; i++) {
       rc += tgp_memory[threadgroup_index.x][i];
     }
     *reinterpret_cast<device vecT *>(outputData + n) =
@@ -66,7 +66,7 @@ int8pack_mm(constant T *A [[buffer(0)]], constant char *B [[buffer(1)]],
       constant DTYPE * A [[buffer(0)]], constant char *B [[buffer(1)]],        \
       constant DTYPE *scales [[buffer(2)]],                                    \
       device DTYPE *outputData [[buffer(3)]],                                  \
-      constant int3 &sizes [[buffer(4)]],                                      \
+      constant uint3 &sizes [[buffer(4)]],                                     \
       uint2 group_index [[threadgroup_position_in_grid]],                      \
       uint2 threadgroup_index [[thread_position_in_threadgroup]]);
 

@@ -41,7 +41,7 @@ kernel void int8pack_mm(constant T *A [[buffer(0)]],
     const auto a_vec = float4(A_ptr[k]);
     rc += transpose(b_mat) * a_vec;
   }
-  reinterpret_cast<device vecT*>(outputData + m * sizes.z)[n] = vecT(rc * float4(reinterpret_cast<constant vecT *>(scales)[n]));
+  reinterpret_cast<device vecT*>(outputData + m * ldc)[n] = vecT(rc * float4(reinterpret_cast<constant vecT *>(scales)[n]));
 }
 
 #define INSTANTIATE_INT8MM(DTYPE)                                              \

@@ -62,7 +62,7 @@ int8pack_mm(constant T *A [[buffer(0)]], constant char *B [[buffer(1)]],
   tgp_memory[threadgroup_index.x][threadgroup_index.y] = rc;
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (threadgroup_index.y == 0) {
-    for (int i = 1; i < blockSize; i++) {
+    for (unsigned i = 1; i < blockSize; i++) {
       rc += tgp_memory[threadgroup_index.x][i];
     }
     *reinterpret_cast<device vecT *>(outputData + n) =
