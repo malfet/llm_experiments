@@ -285,6 +285,15 @@ struct Int8MMMat4OpDescriptor : public Int8MMOpDescriptor {
   }
 };
 
+struct Int8MMMat4xMat4OpDescriptor : public Int8MMOpDescriptor {
+  using Int8MMOpDescriptor::Int8MMOpDescriptor;
+  void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
+                       unsigned maxThreadsPerGroup) const override {
+    [encoder dispatchThreads:MTLSizeMake(N/4, M/4, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, N/4), 1, 1)];
+  }
+};
+
 int main() {
   unsigned M, N, K;
   std::tie(M, N, K) = std::make_tuple(32, 4128, 4096);
@@ -296,11 +305,15 @@ int main() {
                                           K);
     Int8MMMat4OpDescriptor reduce_mat4_int8mm(device, "reduce_mat4_int8mm", M, N,
                                           K);
+    Int8MMMat4xMat4OpDescriptor reduce_mat4xmat4_int8mm(device, "reduce_mat4xmat4_int8mm", M, N,
+                                          K);
     Int8MMBlockOpDesciptor reduce_group_int8mm(device, "reduce_group_int8mm", M,
                                                N, K);
-    reduce_vec4_int8mm.benchmark<BFloat16>();
-    reduce_mat4_int8mm.benchmark<BFloat16>();
+
     reduce_group_int8mm.benchmark<BFloat16>();
+    reduce_mat4xmat4_int8mm.benchmark<BFloat16>();
+    reduce_mat4_int8mm.benchmark<BFloat16>();
+    reduce_vec4_int8mm.benchmark<BFloat16>();
     naive_int8mm.benchmark<BFloat16>();
   }
   return 0;
