@@ -283,6 +283,18 @@ public:
   std::string lib_name;
 };
 
+template <unsigned groupSize>
+struct Int4MMMat4OpDescriptor : public Int4MMOpDescriptor<groupSize> {
+  using Int4MMOpDescriptor<groupSize>::Int4MMOpDescriptor;
+  using Int4MMOpDescriptor<groupSize>::M;
+  using Int4MMOpDescriptor<groupSize>::N;
+  void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
+                       unsigned maxThreadsPerGroup) const override {
+    [encoder dispatchThreads:MTLSizeMake(N/4, M, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, N/4), 1, 1)];
+  }
+};
+
 int main() {
   unsigned M, N, K;
   std::tie(M, N, K) = std::make_tuple(32, 4128, 4096);
@@ -293,8 +305,11 @@ int main() {
     Int4MMOpDescriptor<groupSize> naive_int4mm(device, "naive_int4mm", M, N, K);
     Int4MMOpDescriptor<groupSize> reduce_vec4_int4mm(device, "reduce_vec4_int4mm", M, N,
                                           K);
+    Int4MMMat4OpDescriptor<groupSize> reduce_mat4_int4mm(device, "reduce_mat4_int4mm", M, N,
+                                          K);
 
     // Benchmarks
+    reduce_mat4_int4mm.benchmark<BFloat16>();
     reduce_vec4_int4mm.benchmark<BFloat16>();
     naive_int4mm.benchmark<BFloat16>();
   }
