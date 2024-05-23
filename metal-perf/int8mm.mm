@@ -276,11 +276,33 @@ struct Int8MMBlockOpDesciptor : public Int8MMOpDescriptor {
   }
 };
 
+struct Int8MMBlockMat4xMat4OpDesciptor : public Int8MMOpDescriptor {
+  using Int8MMOpDescriptor::Int8MMOpDescriptor;
+  void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
+                       unsigned maxThreadsPerGroup) const override {
+    constexpr auto blockSize = 8;
+    if (maxThreadsPerGroup < blockSize * blockSize) {
+      throw std::runtime_error("Can't dispatch!");
+    }
+    [encoder dispatchThreads:MTLSizeMake(M * N / 16, blockSize, 1)
+        threadsPerThreadgroup:MTLSizeMake(blockSize, blockSize, 1)];
+  }
+};
+
 struct Int8MMMat4OpDescriptor : public Int8MMOpDescriptor {
   using Int8MMOpDescriptor::Int8MMOpDescriptor;
   void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
                        unsigned maxThreadsPerGroup) const override {
     [encoder dispatchThreads:MTLSizeMake(N/4, M, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, N/4), 1, 1)];
+  }
+};
+
+struct Int8MMMat4xMat4OpDescriptor : public Int8MMOpDescriptor {
+  using Int8MMOpDescriptor::Int8MMOpDescriptor;
+  void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
+                       unsigned maxThreadsPerGroup) const override {
+    [encoder dispatchThreads:MTLSizeMake(N/4, M/4, 1)
         threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, N/4), 1, 1)];
   }
 };
@@ -296,11 +318,17 @@ int main() {
                                           K);
     Int8MMMat4OpDescriptor reduce_mat4_int8mm(device, "reduce_mat4_int8mm", M, N,
                                           K);
+    Int8MMMat4xMat4OpDescriptor reduce_mat4xmat4_int8mm(device, "reduce_mat4xmat4_int8mm", M, N,
+                                          K);
     Int8MMBlockOpDesciptor reduce_group_int8mm(device, "reduce_group_int8mm", M,
                                                N, K);
-    reduce_vec4_int8mm.benchmark<BFloat16>();
-    reduce_mat4_int8mm.benchmark<BFloat16>();
+    Int8MMBlockMat4xMat4OpDesciptor reduce_group_mat4xmat4_int8mm(device, "reduce_group_mat4xmat4_int8mm", M, N, K);
+
+    reduce_group_mat4xmat4_int8mm.benchmark<BFloat16>();
     reduce_group_int8mm.benchmark<BFloat16>();
+    reduce_mat4xmat4_int8mm.benchmark<BFloat16>();
+    reduce_mat4_int8mm.benchmark<BFloat16>();
+    reduce_vec4_int8mm.benchmark<BFloat16>();
     naive_int8mm.benchmark<BFloat16>();
   }
   return 0;
