@@ -306,12 +306,8 @@ struct Int4MMMat4xMat4OpDescriptor : public Int4MMOpDescriptor<groupSize> {
   using Int4MMOpDescriptor<groupSize>::N;
   void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
                        unsigned maxThreadsPerGroup) const override {
-    constexpr auto blockSize = 8;
-    if (maxThreadsPerGroup < blockSize * blockSize) {
-      throw std::runtime_error("Can't dispatch!");
-    }
-    [encoder dispatchThreads:MTLSizeMake(N/4, M/4, 1)
-        threadsPerThreadgroup:MTLSizeMake(blockSize, blockSize, 1)];
+    [encoder dispatchThreads:MTLSizeMake(N / 4, (M + 3) / 4, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, M), 1, 1)];
   }
 };
 
