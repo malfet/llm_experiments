@@ -306,12 +306,8 @@ struct Int4MMMat4xMat4OpDescriptor : public Int4MMOpDescriptor<groupSize> {
   using Int4MMOpDescriptor<groupSize>::N;
   void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
                        unsigned maxThreadsPerGroup) const override {
-    constexpr auto blockSize = 8;
-    if (maxThreadsPerGroup < blockSize * blockSize) {
-      throw std::runtime_error("Can't dispatch!");
-    }
-    [encoder dispatchThreads:MTLSizeMake(N/4, M/4, 1)
-        threadsPerThreadgroup:MTLSizeMake(blockSize, blockSize, 1)];
+    [encoder dispatchThreads:MTLSizeMake(N / 4, (M + 3) / 4, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min(maxThreadsPerGroup, M), 1, 1)];
   }
 };
 
@@ -322,6 +318,7 @@ int main() {
   @autoreleasepool {
     id<MTLDevice> device = getMetalDevice();
     std::cout << "Using device " << device.name.UTF8String << std::endl;
+    std::cout << "Dimensions (M, N, K) = (" << M << ", " << N << ", " << K << ")" << std::endl;
     Int4MMOpDescriptor<groupSize> naive_int4mm(device, "naive_int4mm", M, N, K);
     Int4MMOpDescriptor<groupSize> reduce_vec4_int4mm(device, "reduce_vec4_int4mm", M, N,
                                           K);

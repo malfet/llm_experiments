@@ -37,7 +37,6 @@ kernel void int4pack_mm(
 
     using vecT = typename Vec4Type<T>::type;
     constant vecT *A_ptr = reinterpret_cast<constant vecT *>(A + m * 4 * K);
-    //constant uchar2 *B_ptr = reinterpret_cast<constant uchar2 *>(B + (nb * 16 * K));
     constant uchar *B_ptr = B + (nb * 16 * K);
 
     float4x4 rc;
@@ -46,20 +45,11 @@ kernel void int4pack_mm(
     }
     uint k = 0;
     for (uint32_t kb = 0; kb < k_block ; kb ++) {
-      const T scale0 = scalesAndZeros[(kb * N + 4 * n) * 2 + 0];
-      const T zero0 = scalesAndZeros[(kb * N + 4 * n) * 2 + 1] - scale0 * T(8);
-
-      const T scale1 = scalesAndZeros[(kb * N + 4 * n + 1) * 2 + 0];
-      const T zero1 = scalesAndZeros[(kb * N + 4 * n + 1) * 2 + 1] - scale1 * T(8);
-
-      const T scale2 = scalesAndZeros[(kb * N + 4 * n + 2) * 2 + 0];
-      const T zero2 = scalesAndZeros[(kb * N + 4 * n + 2) * 2 + 1] - scale2 * T(8);
-
-      const T scale3 = scalesAndZeros[(kb * N + 4 * n + 3) * 2 + 0];
-      const T zero3 = scalesAndZeros[(kb * N + 4 * n + 3) * 2 + 1] - scale3 * T(8);
-
-      const float4 scales = float4(scale0, scale1, scale2, scale3);
-      const float4 zeros = float4(zero0, zero1, zero2, zero3);
+      float4 scales, zeros;
+      for (int i = 0; i < 4; ++i) {
+        scales[i] = scalesAndZeros[(kb * N + 4 * n + i) * 2 + 0];
+        zeros[i] = scalesAndZeros[(kb * N + 4 * n + i) * 2 + 1] - scales[i] * T(8);
+      }
 
       for(uint idx = 0; idx < groupSize && k < K; idx += 4, k += 4) {
         float4x4 a_mat;
@@ -82,10 +72,9 @@ kernel void int4pack_mm(
         rc += t_b_mat * a_mat;
       }
     }
-    reinterpret_cast<device vecT*>(outputData + 4 * m * N)[n] = vecT(rc[0]);
-    reinterpret_cast<device vecT*>(outputData + (4 * m + 1) * N)[n] = vecT(rc[1]);
-    reinterpret_cast<device vecT*>(outputData + (4 * m + 2) * N)[n] = vecT(rc[2]);
-    reinterpret_cast<device vecT*>(outputData + (4 * m + 3) * N)[n] = vecT(rc[3]);
+    for (int i = 0; i < 4; ++i) {
+      reinterpret_cast<device vecT*>(outputData + (4 * m + i) * N)[n] = vecT(rc[i]);
+    }
 }
 
 #define INSTANTIATE_INT4MM(DTYPE, GSIZE)                                 \
