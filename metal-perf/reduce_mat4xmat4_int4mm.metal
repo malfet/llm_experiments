@@ -27,6 +27,7 @@ kernel void int4pack_mm(
     device   T                 * outputData     [[buffer(3)]],
     constant uint3             & sizes          [[buffer(4)]], // M, K, N
     uint2                        thread_index   [[thread_position_in_grid]]) {
+    const uint M = sizes.x;
     const uint K = sizes.y;
     const uint N = sizes.z;
     const uint m = thread_index.y; // 0..M/4-1
@@ -53,9 +54,20 @@ kernel void int4pack_mm(
 
       for(uint idx = 0; idx < groupSize && k < K; idx += 4, k += 4) {
         float4x4 a_mat;
+
         for(int j = 0; j < 4; ++j) {
+          a_mat[j] = float4(0.0);
+        }
+        for(int j = 0; j < 4 & m + j < M; ++j) {
           a_mat[j] = float4(A_ptr[k/4 + j * K / 4]);
         }
+
+        /*
+        for(uint j = 0; j < 4; ++j) {
+          //j = min(j, M-m-1);
+          a_mat[j] = float4(A_ptr[k/4 + j * K / 4]);
+        }
+        */
 
         float4x4 t_b_mat;
         for(int j = 0; j < 4; ++j) {
