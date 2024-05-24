@@ -1,37 +1,32 @@
 //
-//  LlamaCppInt8Linear.metal
+//  CustomLinear.h
 //  CustomLinear
 //
-//  Created by Mengwei Liu on 5/13/24.
+//  Created by Mengwei Liu on 5/10/24.
 //
-
 
 #include <metal_stdlib>
 using namespace metal;
 template <typename T> struct BlockType {};
 
 template <> struct BlockType<float> {
-  using type4x4 = float4x4;
-  using type2x4 = float2x4;
   using simdgroup_type8x8 = simdgroup_float8x8;
+  using type4 = float4;
 };
 
 template <> struct BlockType<half> {
-  using type4x4 = half4x4;
-  using type2x4 = half2x4;
   using simdgroup_type8x8 = simdgroup_half8x8;
+  using type4 = half4;
 };
+#if __METAL_VERSION__ >= 310
+template <> struct BlockType<bfloat> {
+  using simdgroup_type8x8 = simdgroup_bfloat8x8;
+  using type4 = bfloat4;
+};
+#endif
 
-
-template<typename T>
-void dequantize_f32(constant float * src, constant T * scales, uint index, thread float4x4 & reg) {
-    for (int i = 0; i < 16; i++){
-        reg[i/4][i%4] = src[i];
-    }
-}
-
-template<typename T>
-void dequantize_f16(constant half * src, constant T * scales, uint index, thread float4x4 & reg) {
+template<typename T, typename FLOAT>
+void dequantize_float(constant FLOAT * src, constant T * scales, uint index, thread float4x4 & reg) {
     for (int i = 0; i < 16; i++){
         reg[i/4][i%4] = src[i];
     }
@@ -68,8 +63,7 @@ kernel void kernel_mul_mm(
     uint                         tiitg          [[thread_index_in_threadgroup]], // 128 per threadgroup
     uint                         sgitg          [[simdgroup_index_in_threadgroup]]) {
 
-    using T4x4 = typename BlockType<T>::type4x4;
-    using T2x4 = typename BlockType<T>::type2x4;
+    using T4 = typename BlockType<T>::type4;
     using Tsimd8x8 = typename BlockType<T>::simdgroup_type8x8;
     // sizes: x = M, y = K, z = N
     // pytorch: M x K @ N x K -> M x N
@@ -104,11 +98,11 @@ kernel void kernel_mul_mm(
     short thread_row = ((short)tiitg/THREAD_PER_ROW) < n_rows ? ((short)tiitg/THREAD_PER_ROW) : n_rows - 1;
     short thread_col = ((short)tiitg/THREAD_PER_COL) < n_cols ? ((short)tiitg/THREAD_PER_COL) : n_cols - 1;
 
-    simdgroup_float8x8  ma[4]; // dequantized weight
+    simdgroup_float8x8 ma[4]; // dequantized weight
     Tsimd8x8 mb[2]; // input
-    Tsimd8x8 c_res[8]; // outer product result
+    simdgroup_float8x8 c_res[8]; // outer product result
     for (int i = 0; i < 8; i++){
-        c_res[i] = make_filled_simdgroup_matrix<T, 8>(0.f);
+        c_res[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
     }
 
     constant W * x = (constant W *)(src0
@@ -117,9 +111,6 @@ kernel void kernel_mul_mm(
     constant T * y = (constant T *)(src1
         + nb11 * (r1 * BLOCK_SIZE_N + thread_col)
         + nb10 * (BLOCK_SIZE_K / THREAD_PER_COL * (tiitg % THREAD_PER_COL)));
-    // DEBUG:
-    constant T4x4 * temp_y = (constant T4x4 *)y;
-    constant W * temp_x = (constant W *)x;
 
     // scales index
     uint scale_index = r0 * BLOCK_SIZE_M + thread_row;
@@ -145,7 +136,11 @@ kernel void kernel_mul_mm(
             *(sa + sa_offset) = temp_a[i/4][i%4];
         }
         // read 8 values for input matrix
-        *(threadgroup T2x4 *)(sb + (tiitg % THREAD_PER_COL) * 8 * 32 + 8 * (tiitg / THREAD_PER_COL)) = *((constant T2x4 *)y);
+
+        #pragma unroll(8)
+        for (int i = 0; i < 8; i++) {
+            *((threadgroup T *)(sb + (tiitg % THREAD_PER_COL) * 8 * 32 + 8 * (tiitg / THREAD_PER_COL)) + i) = *(y + i);
+        }
 
         x += BLOCK_SIZE_K;
         y += BLOCK_SIZE_K;
@@ -155,9 +150,7 @@ kernel void kernel_mul_mm(
         // load matrices from threadgroup memory and conduct outer products
         threadgroup float * lsma = (sa + THREAD_MAT_M * SG_MAT_SIZE * (sgitg % 2));
         threadgroup T     * lsmb = (sb + THREAD_MAT_N * SG_MAT_SIZE * (sgitg / 2));
-        // DEBUG:
-        threadgroup float4x4 * temp_lsma = (threadgroup float4x4 *)lsma;
-        threadgroup T4x4     * temp_lsmb = (threadgroup T4x4     *)lsmb;
+
         #pragma unroll(4)
         for (int ik = 0; ik < BLOCK_SIZE_K / 8; ik++) {
             #pragma unroll(4)
@@ -180,51 +173,41 @@ kernel void kernel_mul_mm(
         }
     }
 
-    if ((r0 + 1) * BLOCK_SIZE_M <= ne0 && (r1 + 1) * BLOCK_SIZE_N <= ne1) {
-        device T * C = outputData + (BLOCK_SIZE_M * r0 + 32 * (sgitg &  1)) \
-                               + (BLOCK_SIZE_N * r1 + 16 * (sgitg >> 1)) * ne0;
-        for (int i = 0; i < 8; i++) {
-            simdgroup_store(c_res[i], C + 8 * (i%4) + 8 * ne0 * (i/4), ne0);
-            // DEBUG:
-            device T4x4 * temp_C = (device T4x4 *) (C + 8 * (i%4) + 8 * ne0 * (i/4));
-        }
-    } else {
-        // block is smaller than 64x32, we should avoid writing data outside of the matrix
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        threadgroup T * temp_str = ((threadgroup T *)shared_memory) \
-                                      + 32 * (sgitg&1) + (16 * (sgitg>>1)) * BLOCK_SIZE_M;
-        for (int i = 0; i < 8; i++) {
-            simdgroup_store(c_res[i], temp_str + 8 * (i%4) + 8 * BLOCK_SIZE_M * (i/4), BLOCK_SIZE_M);
-        }
+    threadgroup float * temp_str = ((threadgroup float *)shared_memory) \
+                                  + 32 * (sgitg&1) + (16 * (sgitg>>1)) * BLOCK_SIZE_M;
+    for (int i = 0; i < 8; i++) {
+        simdgroup_store(c_res[i], temp_str + 8 * (i%4) + 8 * BLOCK_SIZE_M * (i/4), BLOCK_SIZE_M);
+    }
 
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        device T * C = outputData + (BLOCK_SIZE_M * r0) + (BLOCK_SIZE_N * r1) * ne0;
-        if (sgitg == 0) {
-            for (int i = 0; i < n_rows; i++) {
-                for (int j = tiitg; j < n_cols; j += BLOCK_SIZE_N) {
-                    *(C + i + j * ne0) = *(temp_str + i + j * BLOCK_SIZE_M);
-                    // DEBUG:
-                    device T4x4 * temp_C = (device T4x4 *) (C + i + j * ne0);
-                }
+    device T * C = outputData + (BLOCK_SIZE_M * r0) + (BLOCK_SIZE_N * r1) * ne0;
+    if (sgitg == 0) {
+        for (int i = 0; i < n_rows; i++) {
+            for (int j = tiitg; j < n_cols; j += BLOCK_SIZE_N) {
+                *(C + i + j * ne0) = *(temp_str + i + j * BLOCK_SIZE_M);
             }
         }
     }
 }
 
+#define INSTANTIATE_MM(DTYPE, WDTYPE, DEQUANT_FUNC)                      \
+template                                                                 \
+[[host_name("int8pack_mm_" #DTYPE)]]                       \
+kernel void kernel_mul_mm<DTYPE, WDTYPE, DEQUANT_FUNC>(                  \
+    constant DTYPE             * A              [[buffer(0)]],           \
+    constant char              * B              [[buffer(1)]],           \
+    constant DTYPE             * scalesAndZeros [[buffer(2)]],           \
+    device   DTYPE             * outputData     [[buffer(3)]],           \
+    constant uint3             & sizes          [[buffer(4)]],           \
+    threadgroup uchar          * shared_memory  [[threadgroup(0)]],      \
+    uint3                        tgpig          [[threadgroup_position_in_grid]], \
+    uint                         tiitg          [[thread_index_in_threadgroup]],  \
+    uint                         sgitg          [[simdgroup_index_in_threadgroup]])
 
 
-typedef decltype(kernel_mul_mm<float, float, dequantize_f32>) mat_mm_f32_f32;
-
-template [[host_name("kernel_mul_mm_f32_f32")]]
-kernel mat_mm_f32_f32 kernel_mul_mm<float, float, dequantize_f32>;
-
-typedef decltype(kernel_mul_mm<half, half, dequantize_f16>) mat_mm_f16_f16;
-
-template [[host_name("kernel_mul_mm_f16_f16")]]
-kernel mat_mm_f16_f16 kernel_mul_mm<half, half, dequantize_f16>;
-
-typedef decltype(kernel_mul_mm<float, char, dequantize_i8>) mat_mm_f32_i8;
-
-template [[host_name("int8pack_mm_float")]]
-kernel mat_mm_f32_i8 kernel_mul_mm<float, char, dequantize_i8>;
+INSTANTIATE_MM(float, char, dequantize_i8);
+INSTANTIATE_MM(half, char, dequantize_i8);
+#if __METAL_VERSION__ >= 310
+INSTANTIATE_MM(bfloat, char, dequantize_i8);
+#endif
