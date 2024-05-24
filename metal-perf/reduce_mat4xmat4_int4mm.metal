@@ -55,19 +55,31 @@ kernel void int4pack_mm(
       for(uint idx = 0; idx < groupSize && k < K; idx += 4, k += 4) {
         float4x4 a_mat;
 
+        /*
         for(int j = 0; j < 4; ++j) {
           a_mat[j] = float4(0.0);
         }
         for(int j = 0; j < 4 & m + j < M; ++j) {
           a_mat[j] = float4(A_ptr[k/4 + j * K / 4]);
         }
+        */
 
         /*
         for(uint j = 0; j < 4; ++j) {
-          //j = min(j, M-m-1);
+          j = min(j, M-m-1);
           a_mat[j] = float4(A_ptr[k/4 + j * K / 4]);
         }
         */
+
+        if (M % 4 == 0) {
+          for(int j = 0; j < 4; ++j) {
+            a_mat[j] = float4(A_ptr[k/4 + j * K / 4]);
+          }
+        } else {
+          for(int j = 0; j < 4; ++j) {
+            a_mat[j] = j < M - m ? float4(A_ptr[k/4 + j * K / 4]) : float4(0.0);
+          }
+        }
 
         float4x4 t_b_mat;
         for(int j = 0; j < 4; ++j) {
