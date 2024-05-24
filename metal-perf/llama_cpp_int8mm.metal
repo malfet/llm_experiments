@@ -69,15 +69,11 @@ kernel void kernel_mul_mm(
     // pytorch: M x K @ N x K -> M x N
     // ggml: K x N @ K x M -> N x M
     uint32_t ne00 = sizes.y; // K
-    uint32_t ne01 = sizes.z; // N
     uint32_t nb00 = sizeof(W);
     uint32_t nb01 = nb00 * ne00;
-    uint32_t nb02 = nb01 * ne01;
     uint32_t ne10 = sizes.y; // K
-    uint32_t ne11 = sizes.x; // M
     uint32_t nb10 = sizeof(T);
     uint32_t nb11 = nb10 * ne10;
-    uint32_t nb12 = nb11 * ne11;
     uint32_t ne0 = sizes.z; // N
     uint32_t ne1 = sizes.x; // M
     constant char * src0 = (constant char *)B;
@@ -115,7 +111,7 @@ kernel void kernel_mul_mm(
     // scales index
     uint scale_index = r0 * BLOCK_SIZE_M + thread_row;
 
-    for (int loop_k = 0; loop_k < ne00; loop_k += BLOCK_SIZE_K) {
+    for (uint32_t loop_k = 0; loop_k < ne00; loop_k += BLOCK_SIZE_K) {
         // load data and store to threadgroup memory
         float4x4 temp_a;
         dequantize_func(x, scales, scale_index, temp_a);
@@ -132,7 +128,6 @@ kernel void kernel_mul_mm(
             int col_offset = (tiitg / THREAD_PER_ROW) % 8;
             // now calculates the overall offset for sa
             int sa_offset = (sg_mat_grid_row_index * 8 + sg_mat_grid_col_index) * 64 + (row_offset * 8 + col_offset);
-            float temp_a_val = temp_a[i/4][i%4];
             *(sa + sa_offset) = temp_a[i/4][i%4];
         }
         // read 8 values for input matrix
@@ -209,5 +204,5 @@ kernel void kernel_mul_mm<DTYPE, WDTYPE, DEQUANT_FUNC>(                  \
 INSTANTIATE_MM(float, char, dequantize_i8);
 INSTANTIATE_MM(half, char, dequantize_i8);
 #if __METAL_VERSION__ >= 310
-INSTANTIATE_MM(bfloat, char, dequantize_i8);
+// INSTANTIATE_MM(bfloat, char, dequantize_i8);
 #endif
