@@ -311,9 +311,58 @@ struct Int4MMMat4xMat4OpDescriptor : public Int4MMOpDescriptor<groupSize> {
   }
 };
 
+template <unsigned groupSize>
+struct Int4MM1OpDescriptor : public Int4MMOpDescriptor<groupSize> {
+  using Int4MMOpDescriptor<groupSize>::Int4MMOpDescriptor;
+  using Int4MMOpDescriptor<groupSize>::K;
+  using Int4MMOpDescriptor<groupSize>::N;
+  void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
+                       unsigned maxThreadsPerGroup) const override {
+    [encoder dispatchThreads:MTLSizeMake(N / 2, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(16, 1, 1)];
+  }
+};
+
+template <unsigned groupSize>
+struct Int4MM1Vec4OpDescriptor : public Int4MMOpDescriptor<groupSize> {
+  using Int4MMOpDescriptor<groupSize>::Int4MMOpDescriptor;
+  using Int4MMOpDescriptor<groupSize>::K;
+  using Int4MMOpDescriptor<groupSize>::N;
+  void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
+                       unsigned maxThreadsPerGroup) const override {
+    [encoder dispatchThreads:MTLSizeMake(N / 4, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(8, 1, 1)];
+  }
+};
+
+template <unsigned groupSize>
+struct Int4MM1BlockOpDescriptor : public Int4MMOpDescriptor<groupSize> {
+  using Int4MMOpDescriptor<groupSize>::Int4MMOpDescriptor;
+  using Int4MMOpDescriptor<groupSize>::K;
+  using Int4MMOpDescriptor<groupSize>::N;
+  void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
+                       unsigned maxThreadsPerGroup) const override {
+    [encoder dispatchThreads:MTLSizeMake(N / 2, 4, 1)
+        threadsPerThreadgroup:MTLSizeMake(16, 4, 1)];
+  }
+};
+
+template <unsigned groupSize>
+struct Int4MM1Vec4BlockOpDescriptor : public Int4MMOpDescriptor<groupSize> {
+  using Int4MMOpDescriptor<groupSize>::Int4MMOpDescriptor;
+  using Int4MMOpDescriptor<groupSize>::K;
+  using Int4MMOpDescriptor<groupSize>::N;
+  void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
+                       unsigned maxThreadsPerGroup) const override {
+    [encoder dispatchThreads:MTLSizeMake(N / 2, 4, 1)
+        threadsPerThreadgroup:MTLSizeMake(16, 4, 1)];
+  }
+};
+
 int main() {
   unsigned M, N, K;
-  std::tie(M, N, K) = std::make_tuple(32, 4128, 4096);
+  //std::tie(M, N, K) = std::make_tuple(32, 4128, 4128);
+  std::tie(M, N, K) = std::make_tuple(1, 4128, 4128);
   constexpr unsigned groupSize = 32;
   @autoreleasepool {
     id<MTLDevice> device = getMetalDevice();
@@ -326,8 +375,18 @@ int main() {
                                           K);
     Int4MMMat4xMat4OpDescriptor<groupSize> reduce_mat4xmat4_int4mm(device, "reduce_mat4xmat4_int4mm", M, N,
                                           K);
+    Int4MM1OpDescriptor<groupSize> m1_int4mm(device, "m1_int4mm", M, N, K);
+    Int4MM1Vec4OpDescriptor<groupSize> m1vec4_int4mm(device, "m1vec4_int4mm", M, N, K);
+    Int4MM1BlockOpDescriptor<groupSize> m1block_int4mm(device, "m1block_int4mm", M, N, K);
+    Int4MM1Vec4BlockOpDescriptor<groupSize> m1vec4block_int4mm(device, "m1vec4block_int4mm", M, N, K);
+    Int4MM1Vec4BlockOpDescriptor<groupSize> m1vec4block2_int4mm(device, "m1vec4block2_int4mm", M, N, K);
 
     // Benchmarks
+    m1vec4block2_int4mm.benchmark<BFloat16>();
+    m1vec4block_int4mm.benchmark<BFloat16>();
+    m1block_int4mm.benchmark<BFloat16>();
+    m1vec4_int4mm.benchmark<BFloat16>();
+    m1_int4mm.benchmark<BFloat16>();
     reduce_mat4xmat4_int4mm.benchmark<BFloat16>();
     reduce_mat4_int4mm.benchmark<BFloat16>();
     reduce_vec4_int4mm.benchmark<BFloat16>();
