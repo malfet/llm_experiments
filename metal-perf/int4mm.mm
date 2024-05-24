@@ -318,7 +318,6 @@ int main() {
   @autoreleasepool {
     id<MTLDevice> device = getMetalDevice();
     std::cout << "Using device " << device.name.UTF8String << std::endl;
-    std::cout << "Dimensions (M, N, K) = (" << M << ", " << N << ", " << K << ")" << std::endl;
     Int4MMOpDescriptor<groupSize> naive_int4mm(device, "naive_int4mm", M, N, K);
     Int4MMOpDescriptor<groupSize> reduce_vec4_int4mm(device, "reduce_vec4_int4mm", M, N,
                                           K);
