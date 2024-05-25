@@ -349,7 +349,7 @@ int main() {
     reduce_mat4_int8mm.benchmark<BFloat16>();
     reduce_vec4_int8mm.benchmark<BFloat16>();
     naive_int8mm.benchmark<BFloat16>();
-    llama_cpp_int8mm.benchmark<Float16>(2e-3, 1e-3);
+    llama_cpp_int8mm.benchmark<BFloat16>();
   }
   return 0;
 }
