@@ -189,7 +189,7 @@ struct Int8MMOpDescriptor {
     return true;
   }
 
-  template <typename T> float benchmark() {
+  template <typename T> float benchmark(float atol_lim = 5e-4, float rtol_lim = 5e-3) {
     init<T>();
     id<MTLFunction> func = [lib
         newFunctionWithName:[NSString
@@ -231,7 +231,7 @@ struct Int8MMOpDescriptor {
 
     [captureManager stopCapture];
 
-    if (!validate<T>()) {
+    if (!validate<T>(atol_lim, rtol_lim)) {
       fail("Failed to validate" + lib_name);
     }
     auto gflops = (M * N * K * 1e-9) / measure_time(200, do_compute);
@@ -315,6 +315,16 @@ struct Int8MMMat4xMat4OpDescriptor : public Int8MMOpDescriptor {
   }
 };
 
+struct Int8MMLlamaCppDescriptor : public Int8MMOpDescriptor {
+  using Int8MMOpDescriptor::Int8MMOpDescriptor;
+  void dispatchThreads(id<MTLComputeCommandEncoder> encoder,
+                       unsigned maxThreadsPerGroup) const override {
+    [encoder setThreadgroupMemoryLength:12288 atIndex:0];
+    [encoder dispatchThreadgroups:MTLSizeMake( (M + 31)/32, (N + 63)/64, 1)
+        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+  }
+};
+
 int main() {
   unsigned M, N, K;
   std::tie(M, N, K) = std::make_tuple(32, 4128, 4096);
@@ -331,6 +341,7 @@ int main() {
     Int8MMBlockOpDesciptor reduce_group_int8mm(device, "reduce_group_int8mm", M,
                                                N, K);
     Int8MMBlockMat4xMat4OpDesciptor reduce_group_mat4xmat4_int8mm(device, "reduce_group_mat4xmat4_int8mm", M, N, K);
+    Int8MMLlamaCppDescriptor llama_cpp_int8mm(device, "llama_cpp_int8mm", M, N, K);
 
     reduce_group_mat4xmat4_int8mm.benchmark<BFloat16>();
     reduce_group_int8mm.benchmark<BFloat16>();
@@ -338,6 +349,7 @@ int main() {
     reduce_mat4_int8mm.benchmark<BFloat16>();
     reduce_vec4_int8mm.benchmark<BFloat16>();
     naive_int8mm.benchmark<BFloat16>();
+    llama_cpp_int8mm.benchmark<BFloat16>();
   }
   return 0;
 }
