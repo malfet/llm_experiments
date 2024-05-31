@@ -160,9 +160,49 @@ kernel void kernel_mul_mm(
         }
     }
 
+    /**
+ * Each sgitg 0,1,2,3 handles 2x4 8x8.
+    8   8                          
+  ┌───┬───┬───┬───┬───┬───┬───┬───┐
+ 8│ 0 │ 0 │ 0 │ 0 │ 1 │ 1 │ 1 │ 1 │
+  ├───┼───┼───┼───┼───┼───┼───┼───┤
+  │ 0 │ 0 │ 0 │ 0 │ 1 │ 1 │ 1 │ 1 │
+  ├───┼───┼───┼───┼───┼───┼───┼───┤
+  │ 2 │ 2 │ 2 │ 2 │ 3 │ 3 │ 3 │ 3 │
+  ├───┼───┼───┼───┼───┼───┼───┼───┤
+  │ 2 │ 2 │ 2 │ 2 │ 3 │ 3 │ 3 │ 3 │
+  └───┴───┴───┴───┴───┴───┴───┴───┘
+
+   scale: 8 x BLOCK_SIZE_M, starting from sb. Each sgitg handles 4 8x8 diagonal matrix.                         
+    8   8                           
+  ┌───┬───┬───┬───┬───┬───┬───┬───┐ 
+ 8│   │   │   │   │   │   │   │   │ 
+  └───┴───┴───┴───┴───┴───┴───┴───┘   
+ */
+
     threadgroup float * temp_str = ((threadgroup float *)shared_memory) \
                                   + 32 * (sgitg&1) + (16 * (sgitg>>1)) * BLOCK_SIZE_M;
     for (int i = 0; i < 8; i++) {
+        int block_start = 4 * 8 * (sgitg & 1) + (i % 4) * 8;
+        threadgroup float * temp_scale = (threadgroup float *)sb + block_start;
+        threadgroup float * scale_itr = temp_scale;
+        // dequantize
+        for (int j = 0; j < 8; j++) {
+            // clear next 8 values of scale_itr
+            *((threadgroup float2x4 *)scale_itr) = float2x4(0.f);
+            // find scale
+            int scale_index = r0 * BLOCK_SIZE_M + block_start + j;
+            float2 scale_zero = get_scale_zero_func(scalesAndZeros, uint2(scale_index, 0));
+            // create diagonal matrix of scales
+            *(scale_itr + j) = scale_zero[0];
+            // go to next row
+            scale_itr += BLOCK_SIZE_M;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_float8x8 simd_scale;
+        simdgroup_load(simd_scale, temp_scale, BLOCK_SIZE_M);
+        simdgroup_float8x8 simd_zero = make_filled_simdgroup_matrix<float, 8>(0.f);
+        simdgroup_multiply_accumulate(c_res[i], c_res[i], simd_scale, simd_zero);
         simdgroup_store(c_res[i], temp_str + 8 * (i%4) + 8 * BLOCK_SIZE_M * (i/4), BLOCK_SIZE_M);
     }
 
@@ -171,11 +211,8 @@ kernel void kernel_mul_mm(
     device T * C = outputData + (BLOCK_SIZE_M * r0) + (BLOCK_SIZE_N * r1) * ne0;
     if (sgitg == 0) {
         for (int i = 0; i < n_rows; i++) {
-            // dequantize
-            float2 scale_zero = get_scale_zero_func(scalesAndZeros, uint2(r0 * BLOCK_SIZE_M + i, 0));
             for (int j = tiitg; j < n_cols; j += BLOCK_SIZE_N) {
                 float temp = *(temp_str + i + j * BLOCK_SIZE_M);
-                temp = temp * scale_zero[0] + scale_zero[1];
                 *(C + i + j * ne0) = (device T)(temp);
             }
         }
@@ -184,7 +221,7 @@ kernel void kernel_mul_mm(
 
 #define INSTANTIATE_MM(DTYPE, WDTYPE, DEQUANT_FUNC)                      \
 template                                                                 \
-[[host_name("int8pack_mm_" #DTYPE)]]                       \
+[[host_name("int8pack_mm_" #DTYPE)]]                                     \
 kernel void kernel_mul_mm<DTYPE, WDTYPE, DEQUANT_FUNC>(                  \
     constant DTYPE             * A              [[buffer(0)]],           \
     constant char              * B              [[buffer(1)]],           \
