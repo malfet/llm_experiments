@@ -7,6 +7,7 @@
 # | Xeon 8275CL@3Ghz |  631 us |   64ms  |  3.27 ms |
 # | Xeon @2.2Ghz     | 1.67 ms |   93ms  | 73.52 ms |
 
+import argparse
 from timeit import default_timer
 
 import torch
@@ -69,36 +70,71 @@ def plot_mv_perf(dtype=torch.float32):
     plt.show()
 
 
-def benchmark_linalg(m: int = 1, n: int = 256, k: int = 768, device="cpu") -> None:
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+DEFAULT_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+
+
+def benchmark_linalg(m: int = 1, n: int = 256, k: int = 768, device="cpu", dtypes=None) -> None:
+    if dtypes is None:
+        dtypes = DEFAULT_DTYPES
+
+    for dtype in dtypes:
         rc = bench_mv(n, k, dtype, device=device, trans_a=False)
         print(f"mv_nt   {str(dtype):>14} {rc.mean*1e6:>7.2f} usec")
 
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+    for dtype in dtypes:
         rc = bench_mv(n, k, dtype, device=device, trans_a=True)
         print(f"mv_ta   {str(dtype):>14} {rc.mean*1e6:>7.2f} usec")
 
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+    for dtype in dtypes:
         rc = bench_mm(m, n, k, dtype, device=device)
         print(f"notrans {str(dtype):>14} {rc.mean*1e6:>7.2f} usec")
 
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+    for dtype in dtypes:
         rc = bench_mm(m, n, k, dtype, trans_a=True, device=device)
         print(f"trans_a {str(dtype):>14} {rc.mean*1e6:>7.2f} usec")
 
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+    for dtype in dtypes:
         rc = bench_mm(m, n, k, dtype, trans_b=True, device=device)
         print(f"trans_b {str(dtype):>14} {rc.mean*1e6:>7.2f} usec")
 
 
-if __name__ == "__main__":
-    torch.set_num_threads(1)
-    benchmark_linalg()
+def run_bench(m, n, k):
+    print(f"m={m}, n={n}, k={k}")
+    print("=" * 20)
+    benchmark_linalg(m=m, n=n, k=k)
     if hasattr(torch._C, "_set_cpu_allow_fp16_reduced_precision_reduction"):
         prev = torch._C._get_cpu_allow_fp16_reduced_precision_reduction()
         try:
             torch._C._set_cpu_allow_fp16_reduced_precision_reduction(True)
             print("\n\nUsing FP16 accumulation")
-            benchmark_linalg()
+            benchmark_linalg(m=m, n=n, k=k)
         finally:
             torch._C._set_cpu_allow_fp16_reduced_precision_reduction(prev)
+
+
+def llm_benchmark():
+    interesting_sizes = [(8, 128), (128, 8), (4096, 4096), (11008, 4096), (4096, 11008), (32000, 4096)]
+    print("Matrix-vector:")
+    for (m, n) in interesting_sizes:
+        run_bench(m, n, 1)
+    kb = 1024
+    run_bench(16 * kb, 16 * kb, 1)
+    for prompt_length in (4, 8, 16, 32, 128,):
+        print(f"\nMatrix-matrix (prompt len {prompt_length}:")
+        for (m, n) in interesting_sizes:
+            run_bench(m, n, prompt_length)
+
+
+def default_benchmark():
+    run_bench(1, 256, 768)
+
+
+if __name__ == "__main__":
+    torch.set_num_threads(1)
+    parser = argparse.ArgumentParser(description="Benchmark PyTorch matrix-vector and matrix-matrix multiplication.")
+    parser.add_argument("benchmark", nargs="?")
+    args = parser.parse_args()
+    if args.benchmark == "llm":
+        llm_benchmark()
+    else:
+        default_benchmark()
