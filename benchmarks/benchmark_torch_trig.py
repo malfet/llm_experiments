@@ -31,7 +31,7 @@ def bench_unary(
 
 mps_ext = None
 mps_lib = None
-def mps_compile(f):
+def mps_optimized_func():
     global mps_ext, mps_lib
     if not hasattr(torch.mps, "_compile_shader"):
         if mps_ext is None:
@@ -67,6 +67,15 @@ template [[host_name("sum_sincos_bfloat")]] kernel void sum_sincos(constant bflo
     return f_s
 
 
+def run_bench_for_device(m, n, device, func, func_compiled):
+    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+        eager_t = bench_unary(m, n, func, dtype, device=device)
+        comp_t = bench_unary(m, n, func_compiled, dtype, device=device)
+        use_msec = eager_t.mean > 1e-4 or comp_t.mean > 1e-4
+        multiplier = 1e3 if use_msec else 1e6
+        uname = "msec" if use_msec else "usec"
+        print(f"torch.sin+torch.cos({device}) {str(dtype):>14} {eager_t.mean*multiplier:>7.2f} {uname} {comp_t.mean*multiplier:>7.2f} {uname} {eager_t.mean/comp_t.mean:>7.2f}")
+
 if __name__ == "__main__":
     def f(x):
         return torch.sin(x) + torch.cos(x)
@@ -75,31 +84,11 @@ if __name__ == "__main__":
 
     torch.set_num_threads(1)
     m, n = 8192, 16384
-    device = "cpu"
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-        eager_t = bench_unary(m, n, f, dtype, device=device)
-        comp_t = bench_unary(m, n, f_c, dtype, device=device)
-        use_msec = eager_t.mean > 1e-4 or comp_t.mean > 1e-4
-        multiplier = 1e3 if use_msec else 1e6
-        uname = "msec" if use_msec else "usec"
-        print(f"torch.sin+torch.cos({device}) {str(dtype):>14} {eager_t.mean*multiplier:>7.2f} {uname} {comp_t.mean*multiplier:>7.2f} {uname} {eager_t.mean/comp_t.mean:>7.2f}")
+    run_bench_for_device(m, n, "cpu", f, f_c)
 
     if torch.cuda.is_available():
-        device = "cuda"
-        for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            eager_t = bench_unary(m, n, f, dtype, device=device)
-            comp_t = bench_unary(m, n, f_c, dtype, device=device)
-            use_msec = eager_t.mean > 1e-4 or comp_t.mean > 1e-4
-            multiplier = 1e3 if use_msec else 1e6
-            uname = "msec" if use_msec else "usec"
-            print(f"torch.sin+torch.cos({device}) {str(dtype):>14} {eager_t.mean*multiplier:>7.2f} {uname} {comp_t.mean*multiplier:>7.2f} {uname} {eager_t.mean/comp_t.mean:>7.2f}")
+        run_bench_for_device(m, n, "cuda", f, f_c)
+
     if torch.backends.mps.is_available():
         device = "mps"
-        for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            eager_t = bench_unary(m, n, f, dtype, device=device)
-            comp_t = bench_unary(m, n, mps_compile(f), dtype, device=device)
-
-            use_msec = eager_t.mean > 1e-4
-            multiplier = 1e3 if use_msec else 1e6
-            uname = "msec" if use_msec else "usec"
-            print(f"torch.sin+torch.cos({device}) {str(dtype):>14} {eager_t.mean*multiplier:>7.2f} {uname} {comp_t.mean*multiplier:>7.2f} {uname} {eager_t.mean/comp_t.mean:>7.2f}")
+        run_bench_for_device(m, n, "mps", f, mps_optimized_func())
