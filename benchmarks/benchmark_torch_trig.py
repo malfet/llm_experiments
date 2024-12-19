@@ -30,11 +30,41 @@ def bench_unary(
 
 
 mps_ext = None
+mps_lib = None
 def mps_compile(f):
-    global mps_ext
-    if mps_ext is None:
-        mps_ext = torch.utils.cpp_extension.load(name="mps_ext", sources=["mps_sum_sincos.mm"])
-    return mps_ext.mps_sum_sincos
+    global mps_ext, mps_lib
+    if not hasattr(torch.mps, "_compile_shader"):
+        if mps_ext is None:
+            mps_ext = torch.utils.cpp_extension.load(name="mps_ext", sources=["mps_sum_sincos.mm"])
+        return mps_ext.mps_sum_sincos
+
+    if mps_lib is None:
+        mps_lib = torch.mps._compile_shader("""
+#include <metal_stdlib>
+using namespace metal;
+template<typename T>
+kernel void sum_sincos(constant T* x,
+                       device   T* out,
+                       uint index [[thread_position_in_grid]])
+{
+    out[index] = static_cast<T>(sin(x[index]) + cos(x[index]));
+}
+
+template [[host_name("sum_sincos_float")]] kernel void sum_sincos(constant float*, device float*, uint);
+template [[host_name("sum_sincos_half")]] kernel void sum_sincos(constant half*, device half*, uint);
+template [[host_name("sum_sincos_bfloat")]] kernel void sum_sincos(constant bfloat*, device bfloat*, uint);
+            """)
+
+    def f_s(x):
+        rc = torch.empty_like(x)
+        if x.dtype == torch.float:
+            mps_lib.sum_sincos_float(x, rc)
+        elif x.dtype == torch.half:
+            mps_lib.sum_sincos_half(x, rc)
+        elif x.dtype == torch.bfloat16:
+            mps_lib.sum_sincos_bfloat(x, rc)
+        return rc
+    return f_s
 
 
 if __name__ == "__main__":
@@ -68,6 +98,7 @@ if __name__ == "__main__":
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
             eager_t = bench_unary(m, n, f, dtype, device=device)
             comp_t = bench_unary(m, n, mps_compile(f), dtype, device=device)
+
             use_msec = eager_t.mean > 1e-4
             multiplier = 1e3 if use_msec else 1e6
             uname = "msec" if use_msec else "usec"
