@@ -40,7 +40,7 @@ kernel void one_i4(device uint4* A [[buffer(0)]],
 
 kernel void inc_f(device float *A [[buffer(0)]],
                    uint idx [[thread_position_in_grid]]) {
-   A[idx] += 1.0;
+   A[idx] += .1;
 }
 
 kernel void inc_f4(device float4 *A [[buffer(0)]],
@@ -153,10 +153,54 @@ void benchmark_kernel(id<MTLLibrary> lib, const char* kernel_name) {
   [cpl release];
 }
 
+template<typename T = float>
+void benchmark_dispatch_overhead(id<MTLLibrary> lib, const char* kernel_name) {
+  constexpr auto block_size = 100 * 1024 * 1024;
+  auto cpl = getComputePipelineState(lib, kernel_name);
+  const auto maxTpG = cpl.maxTotalThreadsPerThreadgroup;
+  auto group_size = MTLSizeMake(maxTpG, 1, 1);
+
+  auto dev = lib.device;
+  auto buffer = allocSharedBuffer(dev, block_size * sizeof(T));
+  auto queue = [dev newCommandQueue];
+  __block int repeat_cnt = 2;
+
+  auto do_compute = ^() {
+    @autoreleasepool {
+      auto cmdBuffer = [queue commandBuffer];
+      auto encoder = [cmdBuffer computeCommandEncoder];
+      [encoder setComputePipelineState:cpl];
+      [encoder setBuffer:buffer offset:0 atIndex:0];
+      for(int idx = 0; idx < repeat_cnt; ++idx)
+        [encoder dispatchThreads:MTLSizeMake(maxTpG, 1, 1)
+            threadsPerThreadgroup:group_size];
+      [encoder endEncoding];
+      [cmdBuffer commit];
+      [cmdBuffer waitUntilCompleted];
+    }
+  };
+
+  // Benchmark performance (including dispatch overhead)
+  for(int cnt = 1; cnt < 3000; cnt += 100) {
+    repeat_cnt = cnt;
+    auto runtime =  measure_time(200, do_compute);
+    auto throughput  = (sizeof(T) * maxTpG * cnt / (1024 * 1024 * 1024.0)) / runtime;
+    std::cout << "Runtime of " << cnt << " dispatches is " << runtime * 1e3 << " msec,  per dispatch " << 1e6 * runtime / cnt
+              << " usec, throughput " << throughput << " GB/s"
+              << " and value is " << *reinterpret_cast<T*>(buffer.contents) << std::endl;
+  }
+
+  [queue release];
+  [buffer release];
+  [cpl release];
+}
+
 int main() {
   auto device = getMetalDevice();
   std::cout << "Using device " << device.name.UTF8String << std::endl;
   auto lib = compileLibraryFromSource(device, metal_lib);
+  benchmark_dispatch_overhead(lib, "inc_f");
+
   benchmark_kernel(lib, "arange_f");
   benchmark_kernel(lib, "arange_i");
   benchmark_kernel(lib, "one_f");
