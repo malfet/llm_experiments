@@ -116,6 +116,7 @@ id<MTLComputePipelineState> getComputePipelineState(id<MTLLibrary> lib, const ch
         std::string("Failed to construct pipeline state: ") +
         error.description.UTF8String);
   }
+  [func release];
   return cpl;
 }
 
@@ -147,6 +148,9 @@ void benchmark_kernel(id<MTLLibrary> lib, const char* kernel_name) {
   // Benchmark performance (including dispatch overhead)
   auto gbps  = (sizeof(float) * block_size / (1024 * 1024 * 1024.0)) / measure_time(200, do_compute);
   std::cout << "Perf of " << kernel_name <<  " is " << gbps << " GB/s" << std::endl;
+  [queue release];
+  [buffer release];
+  [cpl release];
 }
 
 int main() {
@@ -162,4 +166,5 @@ int main() {
   benchmark_kernel(lib, "inc_f");
   benchmark_kernel(lib, "inc_i");
   benchmark_kernel<4>(lib, "inc_f4");
+  [lib release];
 }
