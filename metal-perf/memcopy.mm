@@ -38,6 +38,21 @@ kernel void one_i4(device uint4* A [[buffer(0)]],
    A[idx] = 1;
 }
 
+kernel void inc_f(device float *A [[buffer(0)]],
+                   uint idx [[thread_position_in_grid]]) {
+   A[idx] += 1.0;
+}
+
+kernel void inc_f4(device float4 *A [[buffer(0)]],
+                   uint idx [[thread_position_in_grid]]) {
+   A[idx] += 1.0;
+}
+
+kernel void inc_i(device uint* A [[buffer(0)]],
+                  uint idx [[thread_position_in_grid]]) {
+   A[idx] += 1;
+}
+
 kernel void full_f(device float* A [[buffer(0)]],
                    constant float& v [[buffer(1)]],
                    uint idx [[thread_position_in_grid]]) {
@@ -139,4 +154,7 @@ int main() {
   benchmark_arange(lib, "one_i");
   benchmark_arange<4>(lib, "one_i4");
   benchmark_arange<4>(lib, "one_f4");
+  benchmark_arange(lib, "inc_f");
+  benchmark_arange(lib, "inc_i");
+  benchmark_arange<4>(lib, "inc_f4");
 }
