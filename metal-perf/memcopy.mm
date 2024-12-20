@@ -23,7 +23,17 @@ kernel void one_f(device float *A [[buffer(0)]],
    A[idx] = 1.0;
 }
 
+kernel void one_f4(device float4 *A [[buffer(0)]],
+                   uint idx [[thread_position_in_grid]]) {
+   A[idx] = 1.0;
+}
+
 kernel void one_i(device uint* A [[buffer(0)]],
+                  uint idx [[thread_position_in_grid]]) {
+   A[idx] = 1;
+}
+
+kernel void one_i4(device uint4* A [[buffer(0)]],
                   uint idx [[thread_position_in_grid]]) {
    A[idx] = 1;
 }
@@ -79,6 +89,7 @@ id<MTLLibrary> compileLibraryFromSource(id<MTLDevice> device,
   return library;
 }
 
+template<unsigned ops_per_thread = 1>
 void benchmark_arange(id<MTLLibrary> lib, const char* shader_name) {
   constexpr auto block_size = 100 * 1024 * 1024;
   auto dev = lib.device;
@@ -104,7 +115,7 @@ void benchmark_arange(id<MTLLibrary> lib, const char* shader_name) {
       auto encoder = [cmdBuffer computeCommandEncoder];
       [encoder setComputePipelineState:cpl];
       [encoder setBuffer:buffer offset:0 atIndex:0];
-      [encoder dispatchThreads:MTLSizeMake(block_size, 1, 1)
+      [encoder dispatchThreads:MTLSizeMake(block_size / ops_per_thread, 1, 1)
           threadsPerThreadgroup:group_size];
       [encoder endEncoding];
       [cmdBuffer commit];
@@ -126,4 +137,6 @@ int main() {
   benchmark_arange(lib, "arange_i");
   benchmark_arange(lib, "one_f");
   benchmark_arange(lib, "one_i");
+  benchmark_arange<4>(lib, "one_i4");
+  benchmark_arange<4>(lib, "one_f4");
 }
