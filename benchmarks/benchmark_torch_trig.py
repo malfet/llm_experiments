@@ -1,11 +1,17 @@
 # Benchmark torch.sin + torch.cos performance on varios platforms/dtypes
 # Against torch-2.5.0 for 4096x4096
 
-from timeit import default_timer
-
 import torch
 import torch.utils.cpp_extension
+
+from timeit import default_timer
 from torch.utils.benchmark import Measurement, Timer
+from torch._dynamo.device_interface import register_interface_for_device, DeviceInterface
+from torch._inductor.codegen.common import register_backend_for_device, register_device_op_overrides, DeviceOpOverrides, Kernel
+from torch._inductor.codegen.wrapper import PythonWrapperCodegen
+from torch._inductor.codegen.cpp_wrapper_gpu import CppWrapperGpu
+from torch._inductor.scheduler import BaseScheduling, Scheduler
+from torch._inductor.virtualized import V
 
 def bench_unary(
     m,
@@ -66,6 +72,39 @@ template [[host_name("sum_sincos_bfloat")]] kernel void sum_sincos(constant bflo
         return rc
     return f_s
 
+class MPSDeviceInterace(DeviceInterface):
+    @staticmethod
+    def is_bf16_supported(including_emulation: bool = False):
+        return torch.backends.mps.is_macos_or_newer(14, 0)
+
+class MPSDeviceOpOverrides(DeviceOpOverrides):
+    def device_guard(self, device_idx):
+        assert device_idx == 0
+        return "torch._ops.contextlib.nullcontext()"
+
+    def set_device(self, device_idx):
+        assert device_idx == 0
+        return "# MPS set device"
+
+
+class MPSScheduling(BaseScheduling):
+    def __init__(self, scheduler: Scheduler) -> None:
+        self.scheduler = scheduler
+
+    def group_fn(self, sizes):
+        print(f"MPSScheduling:group_fn({sizes}) called")
+        return tuple(tuple(map(V.graph.sizevars.simplify, s)) for s in sizes)
+
+    def flush(self):
+        print(f"MPSScheduling:flush() called")
+        pass
+
+    def codegen_node(self, node):
+        print("MPSScheduling:codegen_node is called")
+        import pdb; pdb.set_trace()
+        node.mark_run()
+        V.graph.wrapper_code.writeline("# Gya ha ha")
+
 
 def run_bench_for_device(m, n, device, func, func_compiled):
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
@@ -86,6 +125,10 @@ if __name__ == "__main__":
     def f(x):
         return torch.sin(x) + torch.cos(x)
 
+    register_backend_for_device("mps", MPSScheduling, PythonWrapperCodegen, CppWrapperGpu)
+    register_device_op_overrides("mps", MPSDeviceOpOverrides())
+    register_interface_for_device("mps", MPSDeviceInterace)
+
     f_c=torch.compile(f)
 
     torch.set_num_threads(1)
@@ -97,4 +140,4 @@ if __name__ == "__main__":
 
     if torch.backends.mps.is_available():
         device = "mps"
-        run_bench_for_device(m, n, "mps", f, mps_optimized_func())
+        run_bench_for_device(m, n, "mps", f, f_c)
