@@ -104,26 +104,32 @@ id<MTLLibrary> compileLibraryFromSource(id<MTLDevice> device,
   return library;
 }
 
-template<unsigned ops_per_thread = 1>
-void benchmark_arange(id<MTLLibrary> lib, const char* shader_name) {
-  constexpr auto block_size = 100 * 1024 * 1024;
-  auto dev = lib.device;
-  auto func = [lib newFunctionWithName:[NSString stringWithUTF8String:shader_name]];
+id<MTLComputePipelineState> getComputePipelineState(id<MTLLibrary> lib, const char *kernel_name) {
+  auto func = [lib newFunctionWithName:[NSString stringWithUTF8String:kernel_name]];
   if (func == nil) {
     throw std::runtime_error("Can't get function");
   }
   NSError *error = nil;
-  auto cpl = [dev newComputePipelineStateWithFunction:func error:&error];
+  auto cpl = [lib.device newComputePipelineStateWithFunction:func error:&error];
   if (cpl == nil) {
     throw std::runtime_error(
         std::string("Failed to construct pipeline state: ") +
         error.description.UTF8String);
   }
-  const auto maxTpG = [cpl maxTotalThreadsPerThreadgroup];
+  return cpl;
+}
+
+template<unsigned ops_per_thread = 1>
+void benchmark_kernel(id<MTLLibrary> lib, const char* kernel_name) {
+  constexpr auto block_size = 100 * 1024 * 1024;
+  auto cpl = getComputePipelineState(lib, kernel_name);
+  const auto maxTpG = cpl.maxTotalThreadsPerThreadgroup;
   auto group_size = MTLSizeMake(maxTpG, 1, 1);
 
+  auto dev = lib.device;
   auto buffer = allocSharedBuffer(dev, block_size * sizeof(float));
   auto queue = [dev newCommandQueue];
+
   auto do_compute = ^() {
     @autoreleasepool {
       auto cmdBuffer = [queue commandBuffer];
@@ -138,23 +144,22 @@ void benchmark_arange(id<MTLLibrary> lib, const char* shader_name) {
     }
   };
 
-  do_compute();
   // Benchmark performance (including dispatch overhead)
   auto gbps  = (sizeof(float) * block_size / (1024 * 1024 * 1024.0)) / measure_time(200, do_compute);
-  std::cout << "Perf of " << shader_name <<  " is " << gbps << " GB/s" << std::endl;
+  std::cout << "Perf of " << kernel_name <<  " is " << gbps << " GB/s" << std::endl;
 }
 
 int main() {
   auto device = getMetalDevice();
   std::cout << "Using device " << device.name.UTF8String << std::endl;
   auto lib = compileLibraryFromSource(device, metal_lib);
-  benchmark_arange(lib, "arange_f");
-  benchmark_arange(lib, "arange_i");
-  benchmark_arange(lib, "one_f");
-  benchmark_arange(lib, "one_i");
-  benchmark_arange<4>(lib, "one_i4");
-  benchmark_arange<4>(lib, "one_f4");
-  benchmark_arange(lib, "inc_f");
-  benchmark_arange(lib, "inc_i");
-  benchmark_arange<4>(lib, "inc_f4");
+  benchmark_kernel(lib, "arange_f");
+  benchmark_kernel(lib, "arange_i");
+  benchmark_kernel(lib, "one_f");
+  benchmark_kernel(lib, "one_i");
+  benchmark_kernel<4>(lib, "one_i4");
+  benchmark_kernel<4>(lib, "one_f4");
+  benchmark_kernel(lib, "inc_f");
+  benchmark_kernel(lib, "inc_i");
+  benchmark_kernel<4>(lib, "inc_f4");
 }
