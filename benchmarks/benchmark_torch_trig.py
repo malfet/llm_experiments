@@ -1,11 +1,147 @@
 # Benchmark torch.sin + torch.cos performance on varios platforms/dtypes
 # Against torch-2.5.0 for 4096x4096
 
-from timeit import default_timer
-
 import torch
-import torch.utils.cpp_extension
+from timeit import default_timer
 from torch.utils.benchmark import Measurement, Timer
+
+from torch._dynamo.device_interface import register_interface_for_device, DeviceInterface
+from torch._inductor.codegen.common import register_backend_for_device, register_device_op_overrides, DeviceOpOverrides, Kernel, OpOverrides, CSEVariable, IndentedBuffer, DeferredLine
+from torch._inductor.codegen.wrapper import PythonWrapperCodegen
+from torch._inductor.codegen.cpp_wrapper_gpu import CppWrapperGpu
+from torch._inductor.scheduler import BaseScheduling, Scheduler
+from torch._inductor.codegen.simd import constant_repr, SIMDKernel, SIMDScheduling
+from torch._inductor.utils import get_kernel_metadata
+from torch._inductor.virtualized import V
+from torch._inductor.ops_handler import StoreMode
+import sympy
+
+DTYPE_TO_METAL = {
+   torch.float: "float",
+   torch.half: "half",
+   torch.bfloat16: "bfloat",
+}
+
+class MPSDeviceInterace(DeviceInterface):
+    @staticmethod
+    def is_bf16_supported(including_emulation: bool = False):
+        return torch.backends.mps.is_macos_or_newer(14, 0)
+
+class MPSDeviceOpOverrides(DeviceOpOverrides):
+    def device_guard(self, device_idx):
+        assert device_idx == 0
+        return "torch._ops.contextlib.nullcontext()"
+
+    def set_device(self, device_idx):
+        assert device_idx == 0
+        return "# MPS set device"
+
+
+class MPSOverrides(OpOverrides):
+    @staticmethod
+    def to_dtype(
+        x,
+        dtype: torch.dtype,
+        src_dtype: torch.dtype | None = None,
+        use_compute_types=True,
+    ):
+        return f"mps.to_dtype(dtype)"
+
+    @staticmethod
+    def atan(x):
+        return f"metal::atan({x})"
+
+    @staticmethod
+    def sin(x):
+        return f"metal::sin({x})"
+
+    @staticmethod
+    def cos(x):
+        return f"metal::cos({x})"
+
+
+class MPSKernel(SIMDKernel):
+    overrides = MPSOverrides  # type: ignore[assignment]
+    suffix = ";"
+    newvar_prefix = "auto "
+
+    def __init__(
+        self,
+        tiling: dict[str, sympy.Expr],
+        **kwargs,
+    ) -> None:
+        super().__init__(tiling, **kwargs)
+        self.compute = self.body
+        self.loads = self.body
+        self.stores = self.body
+
+    def dtype_to_str(self, dtype: torch.dtype) -> str:
+        return DTYPE_TO_METAL[dtype]
+
+    def load(self, name: str, index: sympy.Expr):
+        """Codegen a load from an InputBuffer"""
+        var = self.args.input(name)
+        index = self.prepare_indexing(index)
+        line = f"{var}[{index}]"
+        return self.cse.generate(self.body, line)
+
+    def store(
+        self, name: str, index: sympy.Expr, value: CSEVariable, mode: StoreMode = None
+    ) -> None:
+        var = self.args.output(name)
+        index = self.prepare_indexing(index)
+        dtype_str = self.dtype_to_str(V.graph.get_dtype(name))
+        line = f"{var}[{index}] = static_cast<{dtype_str}>({value});"
+        self.body.writeline(DeferredLine(name, line))
+
+    def codegen_kernel(self, name=None):
+        """Called at the end to generate a final kernel string"""
+        code = IndentedBuffer()
+        code.writeline('torch.mps._compile_shader("""')
+        with code.indent():
+           code.writeline("kernel void kernel_0(")
+           with code.indent():
+               for outer, inner in self.args.input_buffers.items():
+                   dtype_str = self.dtype_to_str(V.graph.get_dtype(outer))
+                   code.writeline(f"constant {dtype_str}* {inner},")
+               for outer, inner in self.args.output_buffers.items():
+                   dtype_str = self.dtype_to_str(V.graph.get_dtype(outer))
+                   code.writeline(f"device {dtype_str}* {inner},")
+               code.writeline("uint x0 [[thread_position_in_grid]]")
+           code.writeline(") {")
+           with code.indent():
+               code.splice(self.body)
+           code.writeline("}")
+        code.writeline('""")')
+
+        return code.getvalue()
+
+    def call_kernel(self, name: str, node=None):
+        """Codegen a call to this kernel"""
+        wrapper = V.graph.wrapper_code
+        wrapper.generate_kernel_call(
+            name,
+            self.args.python_argdefs()[1],
+            gpu=False, # TODO: Fix me
+            triton=False,
+        )
+
+class MPSScheduling(SIMDScheduling):
+    kernel_type = MPSKernel
+
+    def define_kernel(self, src_code, node_schedule, kernel):
+        wrapper = V.graph.wrapper_code
+        if src_code in wrapper.src_to_kernel:
+            kernel_name = wrapper.src_to_kernel[src_code]
+        else:
+            kernel_name = f"mps_lib.kernel_{wrapper.next_kernel_suffix()}"
+            wrapper.src_to_kernel[src_code] = kernel_name
+            origins, detailed_origins = get_kernel_metadata(node_schedule, wrapper)
+            metadata_comment = f"{origins}\n{detailed_origins}"
+            wrapper.define_kernel("mps_lib", src_code, metadata_comment)
+
+        return kernel_name
+
 
 def bench_unary(
     m,
@@ -29,43 +165,6 @@ def bench_unary(
     return t.blocked_autorange()
 
 
-mps_ext = None
-mps_lib = None
-def mps_optimized_func():
-    global mps_ext, mps_lib
-    if not hasattr(torch.mps, "_compile_shader"):
-        if mps_ext is None:
-            mps_ext = torch.utils.cpp_extension.load(name="mps_ext", sources=["mps_sum_sincos.mm"])
-        return mps_ext.mps_sum_sincos
-
-    if mps_lib is None:
-        mps_lib = torch.mps._compile_shader("""
-#include <metal_stdlib>
-using namespace metal;
-template<typename T>
-kernel void sum_sincos(constant T* x,
-                       device   T* out,
-                       uint index [[thread_position_in_grid]])
-{
-    out[index] = static_cast<T>(sin(x[index]) + cos(x[index]));
-}
-
-template [[host_name("sum_sincos_float")]] kernel void sum_sincos(constant float*, device float*, uint);
-template [[host_name("sum_sincos_half")]] kernel void sum_sincos(constant half*, device half*, uint);
-template [[host_name("sum_sincos_bfloat")]] kernel void sum_sincos(constant bfloat*, device bfloat*, uint);
-            """)
-
-    def f_s(x):
-        rc = torch.empty_like(x)
-        if x.dtype == torch.float:
-            mps_lib.sum_sincos_float(x, rc)
-        elif x.dtype == torch.half:
-            mps_lib.sum_sincos_half(x, rc)
-        elif x.dtype == torch.bfloat16:
-            mps_lib.sum_sincos_bfloat(x, rc)
-        return rc
-    return f_s
-
 
 def run_bench_for_device(m, n, device, func, func_compiled):
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
@@ -87,15 +186,19 @@ if __name__ == "__main__":
     def f(x):
         return torch.sin(x) + torch.cos(x)
 
+    register_backend_for_device("mps", MPSScheduling, PythonWrapperCodegen, CppWrapperGpu)
+    register_device_op_overrides("mps", MPSDeviceOpOverrides())
+    register_interface_for_device("mps", MPSDeviceInterace)
+
     f_c=torch.compile(f)
 
     torch.set_num_threads(1)
     m, n = 8192, 16384
-    run_bench_for_device(m, n, "cpu", f, f_c)
+    # run_bench_for_device(m, n, "cpu", f, f_c)
 
     if torch.cuda.is_available():
         run_bench_for_device(m, n, "cuda", f, f_c)
 
     if torch.backends.mps.is_available():
         device = "mps"
-        run_bench_for_device(m, n, "mps", f, mps_optimized_func())
+        run_bench_for_device(m, n, "mps", f, f_c)
