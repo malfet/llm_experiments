@@ -84,7 +84,7 @@ if __name__ == "__main__":
     f_c=torch.compile(f)
 
     torch.set_num_threads(1)
-    n = 1024**2
+    n = 32 * 1024**2
     run_bench_for_device(n, "cpu", f, f_c)
 
     if torch.cuda.is_available():
