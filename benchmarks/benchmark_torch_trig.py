@@ -73,7 +73,8 @@ def run_bench_for_device(m, n, device, func, func_compiled):
         inp = torch.rand(m, n, dtype=dtype, device=device)
         out = func(inp)
         out_compiled = func_compiled(inp)
-        if not torch.allclose(out, out_compiled):
+        atol = 1e-2 if dtype is torch.bfloat16 else 1e-3 if dtype is torch.float16 else 1e-8
+        if not torch.allclose(out, out_compiled, atol = atol):
             raise RuntimeError(f"out-out_compiled.abs().max() is {(out-out_compiled).abs().max().item()} for {dtype} and {device}")
         eager_t = bench_unary(m, n, func, dtype, device=device)
         comp_t = bench_unary(m, n, func_compiled, dtype, device=device)
