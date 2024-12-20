@@ -69,6 +69,12 @@ template [[host_name("sum_sincos_bfloat")]] kernel void sum_sincos(constant bflo
 
 def run_bench_for_device(m, n, device, func, func_compiled):
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+        # Validate correctness first
+        inp = torch.rand(m, n, dtype=dtype, device=device)
+        out = func(inp)
+        out_compiled = func_compiled(inp)
+        if not torch.allclose(out, out_compiled):
+            raise RuntimeError(f"out-out_compiled.abs().max() is {(out-out_compiled).abs().max().item()} for {dtype} and {device}")
         eager_t = bench_unary(m, n, func, dtype, device=device)
         comp_t = bench_unary(m, n, func_compiled, dtype, device=device)
         use_msec = eager_t.mean > 1e-4 or comp_t.mean > 1e-4
