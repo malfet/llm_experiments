@@ -47,6 +47,7 @@ kernel void add(constant T* x,
 template [[host_name("add_float")]] kernel void add(constant float*, constant float*, device float*, uint);
 template [[host_name("add_half")]] kernel void add(constant half*, constant half*, device half*, uint);
 template [[host_name("add_bfloat")]] kernel void add(constant bfloat*, constant bfloat*, device bfloat*, uint);
+template [[host_name("add_half4")]] kernel void add(constant half4*, constant half4*, device half4*, uint);
             """)
 
     def f_s(x, y):
@@ -54,7 +55,7 @@ template [[host_name("add_bfloat")]] kernel void add(constant bfloat*, constant 
         if x.dtype == torch.float:
             mps_lib.add_float(x, y, rc)
         elif x.dtype == torch.half:
-            mps_lib.add_half(x, y, rc)
+            mps_lib.add_half4(x, y, rc, threads=x.numel()>>2)
         elif x.dtype == torch.bfloat16:
             mps_lib.add_bfloat(x, y, rc)
         return rc
