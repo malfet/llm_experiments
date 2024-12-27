@@ -101,12 +101,12 @@ class MPSKernel(SIMDKernel):
         with code.indent():
            code.writeline("kernel void kernel_0(")
            with code.indent():
-               for outer, inner in self.args.input_buffers.items():
-                   dtype_str = self.dtype_to_str(V.graph.get_dtype(outer))
-                   code.writeline(f"constant {dtype_str}* {inner},")
                for outer, inner in self.args.output_buffers.items():
                    dtype_str = self.dtype_to_str(V.graph.get_dtype(outer))
                    code.writeline(f"device {dtype_str}* {inner},")
+               for outer, inner in self.args.input_buffers.items():
+                   dtype_str = self.dtype_to_str(V.graph.get_dtype(outer))
+                   code.writeline(f"constant {dtype_str}* {inner},")
                code.writeline("uint x0 [[thread_position_in_grid]]")
            code.writeline(") {")
            with code.indent():
@@ -119,9 +119,10 @@ class MPSKernel(SIMDKernel):
     def call_kernel(self, name: str, node=None):
         """Codegen a call to this kernel"""
         wrapper = V.graph.wrapper_code
+        args = list(self.args.output_buffers.keys()) + list(self.args.input_buffers.keys())
         wrapper.generate_kernel_call(
             name,
-            self.args.python_argdefs()[1],
+            args,
             gpu=False, # TODO: Fix me
             triton=False,
         )
@@ -184,7 +185,7 @@ def run_bench_for_device(m, n, device, func, func_compiled):
 
 if __name__ == "__main__":
     def f(x):
-        return torch.sin(x) + torch.cos(x)
+        return torch.sin(x[:,::2]) + torch.cos(x[:,1::2])
 
     register_backend_for_device("mps", MPSScheduling, PythonWrapperCodegen, CppWrapperGpu)
     register_device_op_overrides("mps", MPSDeviceOpOverrides())
