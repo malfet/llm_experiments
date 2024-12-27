@@ -39,15 +39,6 @@ class MPSDeviceOpOverrides(DeviceOpOverrides):
 
 class MPSOverrides(OpOverrides):
     @staticmethod
-    def to_dtype(
-        x,
-        dtype: torch.dtype,
-        src_dtype: torch.dtype | None = None,
-        use_compute_types=True,
-    ):
-        return f"mps.to_dtype(dtype)"
-
-    @staticmethod
     def atan(x):
         return f"metal::atan({x})"
 
