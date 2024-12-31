@@ -97,4 +97,4 @@ if __name__ == "__main__":
         run_bench_for_device(m, n, "cuda", f, f_c)
 
     if torch.backends.mps.is_available():
-        run_bench_for_device(m, n, "mps", f, mps_optimized_func())
+        run_bench_for_device(m, n, "mps", f, f_c)
