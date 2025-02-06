@@ -1,6 +1,6 @@
 // Compile me as
-// clang++ --std=c++17 gemm_perf_studies.mm -framework Metal -framework
-// Foundation Implements matmul of row-first with colum-first matrices using
+// clang++ --std=c++17 gemm_perf_studies.mm -framework Metal -framework Foundation 
+// Implements matmul of row-first with colum-first matrices using
 // naive, vec4 and mat4
 #include <Metal/Metal.h>
 
