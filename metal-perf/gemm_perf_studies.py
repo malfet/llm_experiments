@@ -1,132 +1,234 @@
 import time
 import torch
 
-naive_gemm_src = """// Naive
-// One thread per output element
-kernel void gemm(constant float *A [[buffer(0)]],
+# Kernel function name encodes the layout: gemm_nn, gemm_nt, gemm_tn, gemm_tt
+# N = row-major (not transposed), T = column-major (transposed storage)
+
+
+def make_naive_gemm_src(trans_a, trans_b):
+    """Generate a naive GEMM shader for the given layout combination."""
+    a_index = "m * K + k" if trans_a == "N" else "k * M + m"
+    b_index = "k * N + n" if trans_b == "N" else "n * K + k"
+    label = f"{trans_a}{trans_b}".lower()
+    return f"""// Naive({label})
+kernel void gemm_{label}(constant float *A [[buffer(0)]],
                  constant float *B [[buffer(1)]],
-                 device float *outputData [[buffer(2)]],
+                 device float *C [[buffer(2)]],
                  constant uint3 &sizes [[buffer(3)]],
-                 uint2 thread_index [[thread_position_in_grid]]) {
-  const uint lda = sizes.y;
-  const uint ldc = sizes.z;
-  const uint m = thread_index.y; // 0..sizes.x-1
-  const uint n = thread_index.x; // 0..sizes.z-1
-  constant auto *A_ptr = A + m * lda;
-  constant auto *B_ptr = B + n * lda;
+                 uint2 thread_index [[thread_position_in_grid]]) {{
+  const uint M = sizes.x;
+  const uint K = sizes.y;
+  const uint N = sizes.z;
+  const uint m = thread_index.y;
+  const uint n = thread_index.x;
 
   float rc = 0.0;
-  for (uint k = 0; k < sizes.y; k++) {
-    const auto a_val = A_ptr[k];
-    const auto b_val = B_ptr[k];
-    rc += a_val * b_val;
-  }
-  outputData[m * ldc + n] = rc;
-}
+  for (uint k = 0; k < K; k++) {{
+    rc += A[{a_index}] * B[{b_index}];
+  }}
+  C[m * N + n] = rc;
+}}
 """
 
+
+naive_gemm_src = make_naive_gemm_src("N", "T")
+
 vec4_gemm_src = """// SIMD(vec4)
-// One thread per output element
 using namespace metal;
 
-kernel void gemm(constant float *A [[buffer(0)]],
-                 constant float *B [[buffer(1)]],
-                 device float *outputData [[buffer(2)]],
-                 constant uint3 &sizes [[buffer(3)]],
-                 uint2 thread_index [[thread_position_in_grid]]) {
-  const uint lda = sizes.y;
-  const uint ldc = sizes.z;
-  const uint m = thread_index.y; // 0..sizes.x-1
-  const uint n = thread_index.x; // 0..sizes.z-1
-  constant auto *A_ptr = reinterpret_cast<constant float4 *>(A + m * lda);
-  constant auto *B_ptr = reinterpret_cast<constant float4 *>(B + n * lda);
+kernel void gemm_nt(constant float *A [[buffer(0)]],
+                    constant float *B [[buffer(1)]],
+                    device float *C [[buffer(2)]],
+                    constant uint3 &sizes [[buffer(3)]],
+                    uint2 thread_index [[thread_position_in_grid]]) {
+  const uint K = sizes.y;
+  const uint N = sizes.z;
+  const uint m = thread_index.y;
+  const uint n = thread_index.x;
+  constant auto *A_ptr = reinterpret_cast<constant float4 *>(A + m * K);
+  constant auto *B_ptr = reinterpret_cast<constant float4 *>(B + n * K);
 
   float rc = 0.0;
-  for (uint k = 0; k < sizes.y / 4; k++) {
+  for (uint k = 0; k < K / 4; k++) {
     rc += dot(A_ptr[k], B_ptr[k]);
   }
-  outputData[m * ldc + n] = rc;
+  C[m * N + n] = rc;
 }
 """
 
 mat4_gemm_src = """// SIMD(mat4xvec4)
-// One thread per group of 4 output elements, 8x8 blocks
 using namespace metal;
 
-kernel void gemm(constant float *A [[buffer(0)]],
-                 constant float *B [[buffer(1)]],
-                 device float *outputData [[buffer(2)]],
-                 constant uint3 &sizes [[buffer(3)]],
-                 uint2 thread_index [[thread_position_in_grid]]) {
-  const uint lda = sizes.y;
-  const uint ldc = sizes.z;
-  const uint m = thread_index.y; // 0..sizes.x-1
-  const uint n = thread_index.x; // 0..sizes.z/4-1
-  constant auto *A_ptr = reinterpret_cast<constant float4 *>(A + m * lda);
-  constant auto *B_ptr = reinterpret_cast<constant float4 *>(B + n * 4 * lda);
+kernel void gemm_nt(constant float *A [[buffer(0)]],
+                    constant float *B [[buffer(1)]],
+                    device float *C [[buffer(2)]],
+                    constant uint3 &sizes [[buffer(3)]],
+                    uint2 thread_index [[thread_position_in_grid]]) {
+  const uint K = sizes.y;
+  const uint N = sizes.z;
+  const uint m = thread_index.y;
+  const uint n = thread_index.x;
+  constant auto *A_ptr = reinterpret_cast<constant float4 *>(A + m * K);
+  constant auto *B_ptr = reinterpret_cast<constant float4 *>(B + n * 4 * K);
 
   float4 rc = 0.0;
-  for (uint k = 0; k < sizes.y / 4; k++) {
+  for (uint k = 0; k < K / 4; k++) {
     float4x4 b_mat;
     for(int j = 0; j < 4; ++j) {
-      b_mat[j] = B_ptr[k + j * lda /4];
+      b_mat[j] = B_ptr[k + j * K / 4];
     }
     rc += transpose(b_mat) * A_ptr[k];
   }
-  reinterpret_cast<device float4*>(outputData + m * ldc)[n] = rc;
+  reinterpret_cast<device float4*>(C + m * N)[n] = rc;
 }
 """
 
 
-class CompiledShader:
-    def __init__(self, source, col_div=1):
-        self._lib = torch.mps.compile_shader(source)
-        # Extract name from first line comment prefix "// "
-        self.name = source.strip().split("\n")[0][3:]
-        self.col_div = col_div
-
-    def __getattr__(self, name):
-        return getattr(self._lib, name)
-
-
-def validate_gemm(lib, M, N, K):
-    A = torch.randn(M, K, device="mps")
-    B = torch.randn(N, K, device="mps")
-    C = torch.zeros(M, N, device="mps")
-    sizes = torch.tensor([M, K, N], device="mps", dtype=torch.int32)
-
-    if lib.col_div == 1:
-        lib.gemm(A, B, C, sizes, threads=(N, M))
+def _get_layout(tensor):
+    """Determine if a 2D tensor is row-major ('N') or column-major ('T')."""
+    if tensor.dim() != 2:
+        raise ValueError(f"Expected 2D tensor, got {tensor.dim()}D")
+    s0, s1 = tensor.stride()
+    d0, d1 = tensor.shape
+    if s1 == 1 and s0 == d1:
+        return "N"
+    elif s0 == 1 and s1 == d0:
+        return "T"
     else:
-        lib.gemm(A, B, C, sizes, threads=(N // lib.col_div, M), group_size=(8, 8))
-
-    torch.testing.assert_close(A @ B.T, C, atol=1e-3, rtol=1e-3)
-    print(f"  {lib.name} dim {M}x{N}x{K} validation passed")
+        raise ValueError(f"Non-contiguous tensor with strides {(s0, s1)}")
 
 
-def benchmark_gemm(lib, M, N, K, repeat_cnt=200, batch_size=10):
-    A = torch.randn(M, K, device="mps")
-    B = torch.randn(N, K, device="mps")
-    C = torch.zeros(M, N, device="mps")
+class GemmDispatcher:
+    """Dispatches GEMM to the best available kernel based on input layouts.
+
+    Kernels are registered by layout key (e.g. 'nt') with a dispatch function.
+    At call time, input layouts are inferred from strides. If no kernel matches,
+    inputs are transposed (.T.contiguous()) to match an available kernel.
+    """
+
+    def __init__(self):
+        self._kernels = {}  # layout_key -> (lib, dispatch_fn, name)
+
+    def register(self, source, dispatch_fn):
+        lib = torch.mps.compile_shader(source)
+        name = source.strip().split("\n")[0][3:]
+        # Extract layout from kernel function name: gemm_xx
+        for func_name in dir(lib):
+            if func_name.startswith("gemm_"):
+                layout_key = func_name[5:]  # e.g. "nt"
+                self._kernels[layout_key] = (lib, dispatch_fn, name)
+                return
+        raise ValueError("No gemm_XX function found in shader")
+
+    @property
+    def available_layouts(self):
+        return list(self._kernels.keys())
+
+    def _adapt(self, A, B, a_layout, b_layout, target_key):
+        """Adapt A and B to match the target kernel layout.
+
+        For the target kernel gemm_XY:
+          - X='n' means kernel wants A as row-major [M,K]
+          - X='t' means kernel wants A as column-major [M,K] (= row-major [K,M])
+          - Y='n' means kernel wants B as row-major [K,N]
+          - Y='t' means kernel wants B as column-major [K,N] (= row-major [N,K])
+
+        A column-major tensor is the .T of a row-major one in memory.
+        .contiguous() converts column-major to row-major (same logical data).
+        .T.contiguous() transposes then makes row-major (flips the layout).
+        """
+        a_need = target_key[0].upper()
+        b_need = target_key[1].upper()
+        A_out = A if a_layout == a_need else (A.T.contiguous().T if a_need == "T" else A.contiguous())
+        B_out = B if b_layout == b_need else (B.T.contiguous().T if b_need == "T" else B.contiguous())
+        return A_out, B_out
+
+    def __call__(self, A, B, C, M, N, K):
+        """Dispatch C[M,N] = A[M,K] @ B[K,N] using the best available kernel.
+
+        A and B can be in any contiguous layout (row-major or column-major).
+        """
+        a_layout = _get_layout(A)
+        b_layout = _get_layout(B)
+        layout_key = (a_layout + b_layout).lower()
+
+        if layout_key in self._kernels:
+            lib, dispatch_fn, _ = self._kernels[layout_key]
+            dispatch_fn(lib, A, B, C, M, N, K)
+            return
+
+        # Adapt inputs to match the first available kernel
+        for avail_key, (lib, dispatch_fn, _) in self._kernels.items():
+            A_adapted, B_adapted = self._adapt(A, B, a_layout, b_layout, avail_key)
+            dispatch_fn(lib, A_adapted, B_adapted, C, M, N, K)
+            return
+
+        raise RuntimeError("No kernels registered")
+
+    def name_for(self, a_layout, b_layout):
+        key = (a_layout + b_layout).lower()
+        if key in self._kernels:
+            _, _, name = self._kernels[key]
+            return name
+        for avail_key, (_, _, name) in self._kernels.items():
+            return f"{name} (adapted {key}->{avail_key})"
+        return "???"
+
+
+def _make_naive_dispatch(layout_key):
+    def dispatch(lib, A, B, C, M, N, K):
+        sizes = torch.tensor([M, K, N], device="mps", dtype=torch.int32)
+        getattr(lib, f"gemm_{layout_key}")(A, B, C, sizes, threads=(N, M))
+    return dispatch
+
+
+def _dispatch_nt(lib, A, B, C, M, N, K):
     sizes = torch.tensor([M, K, N], device="mps", dtype=torch.int32)
+    lib.gemm_nt(A, B, C, sizes, threads=(N, M))
 
-    if lib.col_div == 1:
-        threads = (N, M)
-    else:
-        threads = (N // lib.col_div, M)
-        group_size = (8, 8)
+
+def _dispatch_nt_vec4(lib, A, B, C, M, N, K):
+    sizes = torch.tensor([M, K, N], device="mps", dtype=torch.int32)
+    lib.gemm_nt(A, B, C, sizes, threads=(N, M))
+
+
+def _dispatch_nt_mat4(lib, A, B, C, M, N, K):
+    sizes = torch.tensor([M, K, N], device="mps", dtype=torch.int32)
+    lib.gemm_nt(A, B, C, sizes, threads=(N // 4, M), group_size=(8, 8))
+
+
+def validate_gemm(dispatcher, M, N, K, a_layout="N", b_layout="N"):
+    """Validate C = A @ B where A[M,K] and B[K,N] may be in any layout."""
+    A = torch.randn(M, K, device="mps")
+    B = torch.randn(K, N, device="mps")
+    C = torch.zeros(M, N, device="mps")
+
+    # Optionally transpose storage
+    A_input = A.T.contiguous().T if a_layout == "T" else A
+    B_input = B.T.contiguous().T if b_layout == "T" else B
+
+    dispatcher(A_input, B_input, C, M, N, K)
+    torch.mps.synchronize()
+    torch.testing.assert_close(A @ B, C, atol=1e-3, rtol=1e-3)
+    name = dispatcher.name_for(a_layout, b_layout)
+    print(f"  {name} A={a_layout} B={b_layout} dim {M}x{N}x{K} passed")
+
+
+def benchmark_gemm(dispatcher, M, N, K, a_layout="N", b_layout="N",
+                   repeat_cnt=200, batch_size=10):
+    A = torch.randn(M, K, device="mps")
+    B = torch.randn(K, N, device="mps")
+    C = torch.zeros(M, N, device="mps")
+
+    A_input = A.T.contiguous().T if a_layout == "T" else A
+    B_input = B.T.contiguous().T if b_layout == "T" else B
 
     def dispatch():
-        if lib.col_div == 1:
-            lib.gemm(A, B, C, sizes, threads=threads)
-        else:
-            lib.gemm(A, B, C, sizes, threads=threads, group_size=group_size)
+        dispatcher(A_input, B_input, C, M, N, K)
 
-    # Warmup
     dispatch()
     torch.mps.synchronize()
 
-    # Batch multiple dispatches between syncs to amortize sync overhead
     num_batches = repeat_cnt // batch_size
     start = time.perf_counter()
     for _ in range(num_batches):
@@ -138,26 +240,43 @@ def benchmark_gemm(lib, M, N, K, repeat_cnt=200, batch_size=10):
     total_iters = num_batches * batch_size
     avg_time = elapsed / total_iters
     gflops = M * N * K * 1e-9 / avg_time
-    print(f"  Perf of {lib.name} dim {M}x{N}x{K} is {gflops:.2f} GFLOPs")
+    name = dispatcher.name_for(a_layout, b_layout)
+    print(f"  {name} A={a_layout} B={b_layout}: {gflops:.2f} GFLOPs")
 
 
 def main():
-    M, N, K = 32, 4128, 4096
+    M, N, K = 64, 4128, 4096
     print(f"Using device {torch.backends.mps.get_name()}")
 
-    shaders = [
-        CompiledShader(naive_gemm_src),
-        CompiledShader(vec4_gemm_src),
-        CompiledShader(mat4_gemm_src, col_div=4),
-    ]
+    dispatchers = {}
+
+    # Naive: register all 4 layout variants
+    naive = GemmDispatcher()
+    for ta, tb in [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]:
+        key = f"{ta}{tb}".lower()
+        naive.register(make_naive_gemm_src(ta, tb), _make_naive_dispatch(key))
+    dispatchers["Naive"] = naive
+
+    # SIMD variants: only NT layout
+    for label, src, fn in [
+        ("SIMD(vec4)", vec4_gemm_src, _dispatch_nt_vec4),
+        ("SIMD(mat4xvec4)", mat4_gemm_src, _dispatch_nt_mat4),
+    ]:
+        d = GemmDispatcher()
+        d.register(src, fn)
+        dispatchers[label] = d
+
+    layouts = [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]
 
     print("\nValidation:")
-    for lib in shaders:
-        validate_gemm(lib, M, N, K)
+    for label, d in dispatchers.items():
+        for al, bl in layouts:
+            validate_gemm(d, M, N, K, al, bl)
 
     print("\nBenchmark:")
-    for lib in shaders:
-        benchmark_gemm(lib, M, N, K)
+    for label, d in dispatchers.items():
+        for al, bl in layouts:
+            benchmark_gemm(d, M, N, K, al, bl)
 
 
 if __name__ == "__main__":
