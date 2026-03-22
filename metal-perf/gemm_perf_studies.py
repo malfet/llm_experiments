@@ -151,6 +151,50 @@ kernel void gemm_{label}(constant float *A [[buffer(0)]],
 mat4_gemm_src = make_mat4_gemm_src("N", "T")
 
 
+def mpp_gemm_src(M, N, K):
+    """Generate an MPP matmul2d shader. Sizes are baked into the source.
+
+    Only supports NN layout: A[M,K] row-major, B[K,N] row-major.
+    M must be a multiple of TILE_M (64), N a multiple of TILE_N (32).
+    """
+    TILE_M, TILE_N = 64, 32
+    return f"""// MPP(matmul2d)(nn)
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+using namespace metal;
+using namespace mpp::tensor_ops;
+
+constant constexpr int kM = {M};
+constant constexpr int kK = {K};
+constant constexpr int kN = {N};
+constant constexpr int TILE_M = {TILE_M};
+constant constexpr int TILE_N = {TILE_N};
+
+kernel void gemm_nn(
+    device float* A [[buffer(0)]],
+    device float* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{{
+    device float* A_tile = A + tgid.y * TILE_M * kK;
+    device float* B_tile = B + tgid.x * TILE_N;
+    device float* C_tile = C + tgid.y * TILE_M * kN + tgid.x * TILE_N;
+
+    tensor<device float, extents<int32_t, kK, TILE_M>, tensor_inline> mA(
+        A_tile, extents<int32_t, kK, TILE_M>{{}});
+
+    tensor<device float, extents<int32_t, TILE_N, kK>, tensor_inline> mB(
+        B_tile, extents<int32_t, TILE_N, kK>{{}}, array<int32_t, 2>{{1, kN}});
+
+    tensor<device float, extents<int32_t, TILE_N, TILE_M>, tensor_inline> mC(
+        C_tile, extents<int32_t, TILE_N, TILE_M>{{}}, array<int32_t, 2>{{1, kN}});
+
+    constexpr auto desc = matmul2d_descriptor(TILE_M, TILE_N, kK);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    op.run(mA, mB, mC);
+}}
+"""
+
+
 def _get_layout(tensor):
     """Determine if a 2D tensor is row-major ('N') or column-major ('T')."""
     if tensor.dim() != 2:
@@ -256,6 +300,19 @@ def _make_mat4_dispatch(layout_key):
     return dispatch
 
 
+def _make_mpp_dispatch():
+    def dispatch(lib, A, B, C, M, N, K):
+        TILE_M, TILE_N = 64, 32
+        simd_w = lib.gemm_nn.thread_execution_width
+        threads_per_tg = simd_w * 4
+        num_tg_x = (N + TILE_N - 1) // TILE_N
+        num_tg_y = (M + TILE_M - 1) // TILE_M
+        lib.gemm_nn(A, B, C,
+                    threads=[num_tg_x * threads_per_tg, num_tg_y, 1],
+                    group_size=[threads_per_tg, 1, 1])
+    return dispatch
+
+
 def validate_gemm(dispatcher, M, N, K, a_layout="N", b_layout="N"):
     """Validate C = A @ B where A[M,K] and B[K,N] may be in any layout."""
     A = torch.randn(M, K, device="mps")
@@ -329,6 +386,11 @@ def main():
         key = f"{ta}{tb}".lower()
         mat4.register(make_mat4_gemm_src(ta, tb), _make_mat4_dispatch(key))
     dispatchers["SIMD(mat4xvec4)"] = mat4
+
+    # MPP(matmul2d): only NN layout, dispatcher adapts others
+    mpp = GemmDispatcher()
+    mpp.register(mpp_gemm_src(M, N, K), _make_mpp_dispatch())
+    dispatchers["MPP"] = mpp
 
     layouts = [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]
 
