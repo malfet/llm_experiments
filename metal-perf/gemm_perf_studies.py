@@ -33,55 +33,122 @@ kernel void gemm_{label}(constant float *A [[buffer(0)]],
 
 naive_gemm_src = make_naive_gemm_src("N", "T")
 
-vec4_gemm_src = """// SIMD(vec4)
+
+def make_vec4_gemm_src(trans_a, trans_b):
+    """Generate a vec4 GEMM shader for the given layout combination.
+
+    If K is the contiguous dimension, read as float4* pointer.
+    Otherwise, gather 4 scalar elements into a float4.
+    """
+    label = f"{trans_a}{trans_b}".lower()
+
+    # A: K contiguous when trans_a == "N" (row-major [M,K])
+    if trans_a == "N":
+        a_setup = "  constant auto *A_ptr = reinterpret_cast<constant float4 *>(A + m * K);"
+        a_vec = "A_ptr[k]"
+    else:
+        a_setup = ""
+        a_vec = "float4(A[(k*4+0)*M+m], A[(k*4+1)*M+m], A[(k*4+2)*M+m], A[(k*4+3)*M+m])"
+
+    # B: K contiguous when trans_b == "T" (row-major [N,K])
+    if trans_b == "T":
+        b_setup = "  constant auto *B_ptr = reinterpret_cast<constant float4 *>(B + n * K);"
+        b_vec = "B_ptr[k]"
+    else:
+        b_setup = ""
+        b_vec = "float4(B[(k*4+0)*N+n], B[(k*4+1)*N+n], B[(k*4+2)*N+n], B[(k*4+3)*N+n])"
+
+    return f"""// SIMD(vec4)({label})
 using namespace metal;
 
-kernel void gemm_nt(constant float *A [[buffer(0)]],
+kernel void gemm_{label}(constant float *A [[buffer(0)]],
                     constant float *B [[buffer(1)]],
                     device float *C [[buffer(2)]],
                     constant uint3 &sizes [[buffer(3)]],
-                    uint2 thread_index [[thread_position_in_grid]]) {
+                    uint2 thread_index [[thread_position_in_grid]]) {{
+  const uint M = sizes.x;
   const uint K = sizes.y;
   const uint N = sizes.z;
   const uint m = thread_index.y;
   const uint n = thread_index.x;
-  constant auto *A_ptr = reinterpret_cast<constant float4 *>(A + m * K);
-  constant auto *B_ptr = reinterpret_cast<constant float4 *>(B + n * K);
+{a_setup}
+{b_setup}
 
   float rc = 0.0;
-  for (uint k = 0; k < K / 4; k++) {
-    rc += dot(A_ptr[k], B_ptr[k]);
-  }
+  for (uint k = 0; k < K / 4; k++) {{
+    rc += dot({a_vec}, {b_vec});
+  }}
   C[m * N + n] = rc;
-}
+}}
 """
 
-mat4_gemm_src = """// SIMD(mat4xvec4)
+
+vec4_gemm_src = make_vec4_gemm_src("N", "T")
+
+
+def make_mat4_gemm_src(trans_a, trans_b):
+    """Generate a mat4xvec4 GEMM shader for the given layout combination.
+
+    Processes 4 output N elements at once. For each K chunk of 4:
+    - a_vec: float4 of A[m][k*4..k*4+3] (pointer or gather)
+    - b_mat: float4x4 from 4 K values x 4 N values
+    - If B has N contiguous (trans_b=N): b_mat[j] is a contiguous float4 row,
+      use b_mat * a_vec
+    - If B has K contiguous (trans_b=T): b_mat[j] is a contiguous float4 column,
+      use transpose(b_mat) * a_vec
+    """
+    label = f"{trans_a}{trans_b}".lower()
+
+    # A vector: 4 consecutive K values for row m
+    if trans_a == "N":
+        a_setup = "  constant auto *A_ptr = reinterpret_cast<constant float4 *>(A + m * K);"
+        a_vec = "A_ptr[k]"
+    else:
+        a_setup = ""
+        a_vec = "float4(A[(k*4+0)*M+m], A[(k*4+1)*M+m], A[(k*4+2)*M+m], A[(k*4+3)*M+m])"
+
+    # B matrix: 4x4 block and multiply
+    if trans_b == "T":
+        # B[N,K] row-major, K contiguous. Read float4 along K for 4 consecutive N rows.
+        b_setup = "  constant auto *B_ptr = reinterpret_cast<constant float4 *>(B + n * 4 * K);"
+        b_mat_fill = "b_mat[j] = B_ptr[k + j * K / 4];"
+        multiply = f"transpose(b_mat) * {a_vec}"
+    else:
+        # B[K,N] row-major, N contiguous. Read float4 along N for 4 consecutive K rows.
+        b_setup = ""
+        b_mat_fill = "b_mat[j] = *reinterpret_cast<constant float4*>(B + (k*4+j)*N + n*4);"
+        multiply = f"b_mat * {a_vec}"
+
+    return f"""// SIMD(mat4xvec4)({label})
 using namespace metal;
 
-kernel void gemm_nt(constant float *A [[buffer(0)]],
+kernel void gemm_{label}(constant float *A [[buffer(0)]],
                     constant float *B [[buffer(1)]],
                     device float *C [[buffer(2)]],
                     constant uint3 &sizes [[buffer(3)]],
-                    uint2 thread_index [[thread_position_in_grid]]) {
+                    uint2 thread_index [[thread_position_in_grid]]) {{
+  const uint M = sizes.x;
   const uint K = sizes.y;
   const uint N = sizes.z;
   const uint m = thread_index.y;
   const uint n = thread_index.x;
-  constant auto *A_ptr = reinterpret_cast<constant float4 *>(A + m * K);
-  constant auto *B_ptr = reinterpret_cast<constant float4 *>(B + n * 4 * K);
+{a_setup}
+{b_setup}
 
   float4 rc = 0.0;
-  for (uint k = 0; k < K / 4; k++) {
+  for (uint k = 0; k < K / 4; k++) {{
     float4x4 b_mat;
-    for(int j = 0; j < 4; ++j) {
-      b_mat[j] = B_ptr[k + j * K / 4];
-    }
-    rc += transpose(b_mat) * A_ptr[k];
-  }
+    for(int j = 0; j < 4; ++j) {{
+      {b_mat_fill}
+    }}
+    rc += {multiply};
+  }}
   reinterpret_cast<device float4*>(C + m * N)[n] = rc;
-}
+}}
 """
+
+
+mat4_gemm_src = make_mat4_gemm_src("N", "T")
 
 
 def _get_layout(tensor):
@@ -182,19 +249,11 @@ def _make_naive_dispatch(layout_key):
     return dispatch
 
 
-def _dispatch_nt(lib, A, B, C, M, N, K):
-    sizes = torch.tensor([M, K, N], device="mps", dtype=torch.int32)
-    lib.gemm_nt(A, B, C, sizes, threads=(N, M))
-
-
-def _dispatch_nt_vec4(lib, A, B, C, M, N, K):
-    sizes = torch.tensor([M, K, N], device="mps", dtype=torch.int32)
-    lib.gemm_nt(A, B, C, sizes, threads=(N, M))
-
-
-def _dispatch_nt_mat4(lib, A, B, C, M, N, K):
-    sizes = torch.tensor([M, K, N], device="mps", dtype=torch.int32)
-    lib.gemm_nt(A, B, C, sizes, threads=(N // 4, M), group_size=(8, 8))
+def _make_mat4_dispatch(layout_key):
+    def dispatch(lib, A, B, C, M, N, K):
+        sizes = torch.tensor([M, K, N], device="mps", dtype=torch.int32)
+        getattr(lib, f"gemm_{layout_key}")(A, B, C, sizes, threads=(N // 4, M), group_size=(8, 8))
+    return dispatch
 
 
 def validate_gemm(dispatcher, M, N, K, a_layout="N", b_layout="N"):
@@ -257,14 +316,19 @@ def main():
         naive.register(make_naive_gemm_src(ta, tb), _make_naive_dispatch(key))
     dispatchers["Naive"] = naive
 
-    # SIMD variants: only NT layout
-    for label, src, fn in [
-        ("SIMD(vec4)", vec4_gemm_src, _dispatch_nt_vec4),
-        ("SIMD(mat4xvec4)", mat4_gemm_src, _dispatch_nt_mat4),
-    ]:
-        d = GemmDispatcher()
-        d.register(src, fn)
-        dispatchers[label] = d
+    # SIMD(vec4): register all 4 layout variants
+    vec4 = GemmDispatcher()
+    for ta, tb in [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]:
+        key = f"{ta}{tb}".lower()
+        vec4.register(make_vec4_gemm_src(ta, tb), _make_naive_dispatch(key))
+    dispatchers["SIMD(vec4)"] = vec4
+
+    # SIMD(mat4xvec4): register all 4 layout variants
+    mat4 = GemmDispatcher()
+    for ta, tb in [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]:
+        key = f"{ta}{tb}".lower()
+        mat4.register(make_mat4_gemm_src(ta, tb), _make_mat4_dispatch(key))
+    dispatchers["SIMD(mat4xvec4)"] = mat4
 
     layouts = [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]
 
