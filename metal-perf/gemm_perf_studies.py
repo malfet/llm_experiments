@@ -151,80 +151,81 @@ kernel void gemm_{label}(constant float *A [[buffer(0)]],
 mat4_gemm_src = make_mat4_gemm_src("N", "T")
 
 
-def mpp_gemm_src(M, N, K, trans_a="N", trans_b="N"):
+def make_mpp_gemm_src(trans_a="N", trans_b="N"):
     """Generate an MPP matmul2d shader for given layout combination.
 
-    Sizes are baked into the source.
+    M, K, N are passed dynamically via constant uint3 &sizes.
     M must be a multiple of TILE_M (64), N a multiple of TILE_N (32).
 
     MPP uses column-major convention internally. For each layout:
       trans_a='N': A[M,K] row-major = col-major [K,M], packed. transpose_left=false.
-      trans_a='T': A[K,M] row-major = col-major [M,K], strides {1,kM}. transpose_left=true.
-      trans_b='N': B[K,N] row-major = col-major [N,K], strides {1,kN}. transpose_right=false.
+      trans_a='T': A[K,M] row-major = col-major [M,K], strides {1,M}. transpose_left=true.
+      trans_b='N': B[K,N] row-major = col-major [N,K], strides {1,N}. transpose_right=false.
       trans_b='T': B[N,K] row-major = col-major [K,N], packed. transpose_right=true.
     """
-    TILE_M, TILE_N = 64, 32
     label = f"{trans_a}{trans_b}".lower()
     transpose_left = "true" if trans_a == "T" else "false"
     transpose_right = "true" if trans_b == "T" else "false"
 
-    # A tiling and tensor setup
+    # A tiling and tensor setup (K dimension is dynamic_extent)
     if trans_a == "N":
         # A[M,K] row-major: row m starts at m*K. Col-major [K,TILE_M], packed.
-        a_tile = "A + tgid.y * TILE_M * kK"
-        a_extents = "kK, TILE_M"
-        a_ctor = "A_tile, extents<int32_t, kK, TILE_M>()"
+        a_tile = "A + tgid.y * TILE_M * K"
+        a_type = "extents<int32_t, dynamic_extent, TILE_M>"
+        a_ctor = f"A_tile, {a_type}(K)"
     else:
-        # A[K,M] row-major: column m at offset m. Col-major [TILE_M,kK], strides {1,kM}.
+        # A[K,M] row-major: column m at offset m. Col-major [TILE_M,K], strides {1,M}.
         a_tile = "A + tgid.y * TILE_M"
-        a_extents = "TILE_M, kK"
-        a_ctor = "A_tile, extents<int32_t, TILE_M, kK>(), array<int32_t, 2>{1, kM}"
+        a_type = "extents<int32_t, TILE_M, dynamic_extent>"
+        a_ctor = f"A_tile, {a_type}(K), array<int32_t, 2>{{1, (int)M}}"
 
-    # B tiling and tensor setup
+    # B tiling and tensor setup (K dimension is dynamic_extent)
     if trans_b == "N":
-        # B[K,N] row-major: column n at offset n. Col-major [TILE_N,kK], strides {1,kN}.
+        # B[K,N] row-major: column n at offset n. Col-major [TILE_N,K], strides {1,N}.
         b_tile = "B + tgid.x * TILE_N"
-        b_extents = "TILE_N, kK"
-        b_ctor = "B_tile, extents<int32_t, TILE_N, kK>(), array<int32_t, 2>{1, kN}"
+        b_type = "extents<int32_t, TILE_N, dynamic_extent>"
+        b_ctor = f"B_tile, {b_type}(K), array<int32_t, 2>{{1, (int)N}}"
     else:
-        # B[N,K] row-major: row n starts at n*K. Col-major [kK,TILE_N], packed.
-        b_tile = "B + tgid.x * TILE_N * kK"
-        b_extents = "kK, TILE_N"
-        b_ctor = "B_tile, extents<int32_t, kK, TILE_N>()"
+        # B[N,K] row-major: row n starts at n*K. Col-major [K,TILE_N], packed.
+        b_tile = "B + tgid.x * TILE_N * K"
+        b_type = "extents<int32_t, dynamic_extent, TILE_N>"
+        b_ctor = f"B_tile, {b_type}(K)"
 
-    # Use str.replace to avoid f-string brace escaping issues with Metal syntax
     return (
         f"// MPP(matmul2d)({label})\n"
         "#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
         "using namespace metal;\n"
         "using namespace mpp::tensor_ops;\n"
         "\n"
-        f"constant constexpr int kM = {M};\n"
-        f"constant constexpr int kK = {K};\n"
-        f"constant constexpr int kN = {N};\n"
-        f"constant constexpr int TILE_M = {TILE_M};\n"
-        f"constant constexpr int TILE_N = {TILE_N};\n"
+        "constant constexpr int TILE_M = 64;\n"
+        "constant constexpr int TILE_N = 32;\n"
         "\n"
         f"kernel void gemm_{label}(\n"
         "    device float* A [[buffer(0)]],\n"
         "    device float* B [[buffer(1)]],\n"
         "    device float* C [[buffer(2)]],\n"
+        "    constant uint3 &sizes [[buffer(3)]],\n"
         "    uint2 tgid [[threadgroup_position_in_grid]])\n"
         "{\n"
+        "    const uint M = sizes.x;\n"
+        "    const uint K = sizes.y;\n"
+        "    const uint N = sizes.z;\n"
+        "\n"
         f"    device float* A_tile = {a_tile};\n"
         f"    device float* B_tile = {b_tile};\n"
-        "    device float* C_tile = C + tgid.y * TILE_M * kN + tgid.x * TILE_N;\n"
+        "    device float* C_tile = C + tgid.y * TILE_M * N + tgid.x * TILE_N;\n"
         "\n"
-        f"    tensor<device float, extents<int32_t, {a_extents}>, tensor_inline> mA(\n"
+        f"    tensor<device float, {a_type}, tensor_inline> mA(\n"
         f"        {a_ctor});\n"
         "\n"
-        f"    tensor<device float, extents<int32_t, {b_extents}>, tensor_inline> mB(\n"
+        f"    tensor<device float, {b_type}, tensor_inline> mB(\n"
         f"        {b_ctor});\n"
         "\n"
         "    tensor<device float, extents<int32_t, TILE_N, TILE_M>, tensor_inline> mC(\n"
-        "        C_tile, extents<int32_t, TILE_N, TILE_M>(), array<int32_t, 2>{1, kN});\n"
+        "        C_tile, extents<int32_t, TILE_N, TILE_M>(), array<int32_t, 2>{1, (int)N});\n"
         "\n"
-        f"    constexpr auto desc = matmul2d_descriptor(TILE_M, TILE_N, kK, {transpose_left}, {transpose_right});\n"
+        f"    constexpr auto desc = matmul2d_descriptor(TILE_M, TILE_N,\n"
+        f"        static_cast<int>(dynamic_extent), {transpose_left}, {transpose_right});\n"
         "    matmul2d<desc, execution_simdgroups<4>> op;\n"
         "    op.run(mA, mB, mC);\n"
         "}\n"
@@ -339,12 +340,13 @@ def _make_mat4_dispatch(layout_key):
 def _make_mpp_dispatch(layout_key):
     def dispatch(lib, A, B, C, M, N, K):
         TILE_M, TILE_N = 64, 32
+        sizes = torch.tensor([M, K, N], device="mps", dtype=torch.int32)
         kernel = getattr(lib, f"gemm_{layout_key}")
         simd_w = kernel.thread_execution_width
         threads_per_tg = simd_w * 4
         num_tg_x = (N + TILE_N - 1) // TILE_N
         num_tg_y = (M + TILE_M - 1) // TILE_M
-        kernel(A, B, C,
+        kernel(A, B, C, sizes,
                threads=[num_tg_x * threads_per_tg, num_tg_y, 1],
                group_size=[threads_per_tg, 1, 1])
     return dispatch
@@ -424,11 +426,11 @@ def main():
         mat4.register(make_mat4_gemm_src(ta, tb), _make_mat4_dispatch(key))
     dispatchers["SIMD(mat4xvec4)"] = mat4
 
-    # MPP(matmul2d): all 4 layout variants via transpose_left/transpose_right
+    # MPP(matmul2d): all 4 layout variants, dynamic sizes
     mpp = GemmDispatcher()
     for ta, tb in [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]:
         key = f"{ta}{tb}".lower()
-        mpp.register(mpp_gemm_src(M, N, K, ta, tb), _make_mpp_dispatch(key))
+        mpp.register(make_mpp_gemm_src(ta, tb), _make_mpp_dispatch(key))
     dispatchers["MPP"] = mpp
 
     layouts = [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]
