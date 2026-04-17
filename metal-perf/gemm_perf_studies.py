@@ -151,8 +151,15 @@ kernel void gemm_{label}(constant float *A [[buffer(0)]],
 mat4_gemm_src = make_mat4_gemm_src("N", "T")
 
 
-def make_mpp_gemm_src(trans_a="N", trans_b="N"):
-    """Generate an MPP matmul2d shader for given layout combination.
+_TORCH_TO_METAL_DTYPE = {
+    torch.float32: "float",
+    torch.float16: "half",
+    torch.bfloat16: "bfloat",
+}
+
+
+def make_mpp_gemm_src(trans_a="N", trans_b="N", dtype=torch.float32):
+    """Generate an MPP matmul2d shader for given layout combination and dtype.
 
     M, K, N are passed dynamically via constant uint3 &sizes.
     M must be a multiple of TILE_M (64), N a multiple of TILE_N (32).
@@ -164,6 +171,7 @@ def make_mpp_gemm_src(trans_a="N", trans_b="N"):
       trans_b='T': B[N,K] row-major = col-major [K,N], packed. transpose_right=true.
     """
     label = f"{trans_a}{trans_b}".lower()
+    metal_type = _TORCH_TO_METAL_DTYPE[dtype]
     transpose_left = "true" if trans_a == "T" else "false"
     transpose_right = "true" if trans_b == "T" else "false"
 
@@ -191,45 +199,44 @@ def make_mpp_gemm_src(trans_a="N", trans_b="N"):
         b_type = "extents<int32_t, dynamic_extent, TILE_N>"
         b_ctor = f"B_tile, {b_type}(K)"
 
-    return (
-        f"// MPP(matmul2d)({label})\n"
-        "#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
-        "using namespace metal;\n"
-        "using namespace mpp::tensor_ops;\n"
-        "\n"
-        "constant constexpr int TILE_M = 64;\n"
-        "constant constexpr int TILE_N = 32;\n"
-        "\n"
-        f"kernel void gemm_{label}(\n"
-        "    device float* A [[buffer(0)]],\n"
-        "    device float* B [[buffer(1)]],\n"
-        "    device float* C [[buffer(2)]],\n"
-        "    constant uint3 &sizes [[buffer(3)]],\n"
-        "    uint2 tgid [[threadgroup_position_in_grid]])\n"
-        "{\n"
-        "    const uint M = sizes.x;\n"
-        "    const uint K = sizes.y;\n"
-        "    const uint N = sizes.z;\n"
-        "\n"
-        f"    device float* A_tile = {a_tile};\n"
-        f"    device float* B_tile = {b_tile};\n"
-        "    device float* C_tile = C + tgid.y * TILE_M * N + tgid.x * TILE_N;\n"
-        "\n"
-        f"    tensor<device float, {a_type}, tensor_inline> mA(\n"
-        f"        {a_ctor});\n"
-        "\n"
-        f"    tensor<device float, {b_type}, tensor_inline> mB(\n"
-        f"        {b_ctor});\n"
-        "\n"
-        "    tensor<device float, extents<int32_t, TILE_N, TILE_M>, tensor_inline> mC(\n"
-        "        C_tile, extents<int32_t, TILE_N, TILE_M>(), array<int32_t, 2>{1, (int)N});\n"
-        "\n"
-        f"    constexpr auto desc = matmul2d_descriptor(TILE_M, TILE_N,\n"
-        f"        static_cast<int>(dynamic_extent), {transpose_left}, {transpose_right});\n"
-        "    matmul2d<desc, execution_simdgroups<4>> op;\n"
-        "    op.run(mA, mB, mC);\n"
-        "}\n"
-    )
+    return f"""// MPP(matmul2d)({label},{metal_type})
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+using namespace metal;
+using namespace mpp::tensor_ops;
+
+constant constexpr int TILE_M = 64;
+constant constexpr int TILE_N = 32;
+
+kernel void gemm_{label}(
+    device {metal_type}* A [[buffer(0)]],
+    device {metal_type}* B [[buffer(1)]],
+    device {metal_type}* C [[buffer(2)]],
+    constant uint3 &sizes [[buffer(3)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{{
+    const uint M = sizes.x;
+    const uint K = sizes.y;
+    const uint N = sizes.z;
+
+    device {metal_type}* A_tile = {a_tile};
+    device {metal_type}* B_tile = {b_tile};
+    device {metal_type}* C_tile = C + tgid.y * TILE_M * N + tgid.x * TILE_N;
+
+    tensor<device {metal_type}, {a_type}, tensor_inline> mA(
+        {a_ctor});
+
+    tensor<device {metal_type}, {b_type}, tensor_inline> mB(
+        {b_ctor});
+
+    tensor<device {metal_type}, extents<int32_t, TILE_N, TILE_M>, tensor_inline> mC(
+        C_tile, extents<int32_t, TILE_N, TILE_M>(), array<int32_t, 2>{{1, (int)N}});
+
+    constexpr auto desc = matmul2d_descriptor(TILE_M, TILE_N,
+        static_cast<int>(dynamic_extent), {transpose_left}, {transpose_right});
+    matmul2d<desc, execution_simdgroups<4>> op;
+    op.run(mA, mB, mC);
+}}
+"""
 
 
 def _get_layout(tensor):
@@ -352,11 +359,12 @@ def _make_mpp_dispatch(layout_key):
     return dispatch
 
 
-def validate_gemm(dispatcher, M, N, K, a_layout="N", b_layout="N"):
+def validate_gemm(dispatcher, M, N, K, a_layout="N", b_layout="N",
+                  dtype=torch.float32):
     """Validate C = A @ B where A[M,K] and B[K,N] may be in any layout."""
-    A = torch.randn(M, K, device="mps")
-    B = torch.randn(K, N, device="mps")
-    C = torch.zeros(M, N, device="mps")
+    A = torch.randn(M, K, device="mps", dtype=dtype)
+    B = torch.randn(K, N, device="mps", dtype=dtype)
+    C = torch.zeros(M, N, device="mps", dtype=dtype)
 
     # Optionally transpose storage
     A_input = A.T.contiguous().T if a_layout == "T" else A
@@ -364,16 +372,19 @@ def validate_gemm(dispatcher, M, N, K, a_layout="N", b_layout="N"):
 
     dispatcher(A_input, B_input, C, M, N, K)
     torch.mps.synchronize()
-    torch.testing.assert_close(A @ B, C, atol=1e-3, rtol=1e-3)
+    # Compute reference in float32 for reduced-precision dtypes
+    ref = A.float() @ B.float()
+    atol, rtol = (1e-1, 1e-1) if dtype != torch.float32 else (1e-3, 1e-3)
+    torch.testing.assert_close(ref.to(dtype), C, atol=atol, rtol=rtol)
     name = dispatcher.name_for(a_layout, b_layout)
     print(f"  {name} A={a_layout} B={b_layout} dim {M}x{N}x{K} passed")
 
 
 def benchmark_gemm(dispatcher, M, N, K, a_layout="N", b_layout="N",
-                   repeat_cnt=200, batch_size=10):
-    A = torch.randn(M, K, device="mps")
-    B = torch.randn(K, N, device="mps")
-    C = torch.zeros(M, N, device="mps")
+                   dtype=torch.float32, repeat_cnt=200, batch_size=10):
+    A = torch.randn(M, K, device="mps", dtype=dtype)
+    B = torch.randn(K, N, device="mps", dtype=dtype)
+    C = torch.zeros(M, N, device="mps", dtype=dtype)
 
     A_input = A.T.contiguous().T if a_layout == "T" else A
     B_input = B.T.contiguous().T if b_layout == "T" else B
@@ -410,40 +421,45 @@ def main():
     for ta, tb in [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]:
         key = f"{ta}{tb}".lower()
         naive.register(make_naive_gemm_src(ta, tb), _make_naive_dispatch(key))
-    dispatchers["Naive"] = naive
+    dispatchers["Naive"] = (naive, torch.float32)
 
     # SIMD(vec4): register all 4 layout variants
     vec4 = GemmDispatcher()
     for ta, tb in [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]:
         key = f"{ta}{tb}".lower()
         vec4.register(make_vec4_gemm_src(ta, tb), _make_naive_dispatch(key))
-    dispatchers["SIMD(vec4)"] = vec4
+    dispatchers["SIMD(vec4)"] = (vec4, torch.float32)
 
     # SIMD(mat4xvec4): register all 4 layout variants
     mat4 = GemmDispatcher()
     for ta, tb in [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]:
         key = f"{ta}{tb}".lower()
         mat4.register(make_mat4_gemm_src(ta, tb), _make_mat4_dispatch(key))
-    dispatchers["SIMD(mat4xvec4)"] = mat4
+    dispatchers["SIMD(mat4xvec4)"] = (mat4, torch.float32)
 
-    # MPP(matmul2d): all 4 layout variants, dynamic sizes
-    mpp = GemmDispatcher()
-    for ta, tb in [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]:
-        key = f"{ta}{tb}".lower()
-        mpp.register(make_mpp_gemm_src(ta, tb), _make_mpp_dispatch(key))
-    dispatchers["MPP"] = mpp
+    # MPP(matmul2d): all 4 layout variants, dynamic sizes, multiple dtypes
+    mpp_dtypes = [torch.float32, torch.float16, torch.bfloat16]
+    for dt in mpp_dtypes:
+        dt_label = {torch.float32: "float", torch.float16: "half",
+                    torch.bfloat16: "bfloat"}[dt]
+        mpp = GemmDispatcher()
+        for ta, tb in [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]:
+            key = f"{ta}{tb}".lower()
+            mpp.register(make_mpp_gemm_src(ta, tb, dtype=dt),
+                         _make_mpp_dispatch(key))
+        dispatchers[f"MPP({dt_label})"] = (mpp, dt)
 
     layouts = [("N", "N"), ("N", "T"), ("T", "N"), ("T", "T")]
 
     print("\nValidation:")
-    for label, d in dispatchers.items():
+    for label, (d, dt) in dispatchers.items():
         for al, bl in layouts:
-            validate_gemm(d, M, N, K, al, bl)
+            validate_gemm(d, M, N, K, al, bl, dtype=dt)
 
     print("\nBenchmark:")
-    for label, d in dispatchers.items():
+    for label, (d, dt) in dispatchers.items():
         for al, bl in layouts:
-            benchmark_gemm(d, M, N, K, al, bl)
+            benchmark_gemm(d, M, N, K, al, bl, dtype=dt)
 
 
 if __name__ == "__main__":
