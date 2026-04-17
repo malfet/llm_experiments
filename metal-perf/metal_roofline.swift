@@ -1,4 +1,5 @@
-// Metal GPU roofline benchmark: measures peak compute (FP32/FP16/BF16/INT) and memory bandwidth.
+// Metal GPU roofline benchmark: measures peak compute (FP32/FP16/BF16/INT), memory bandwidth,
+// and — on macOS 15+ — MPP matmul2d GEMM throughput (float/half/bfloat, TN layout).
 // Build: swiftc -O -o metal_roofline metal_roofline.swift -framework Metal -framework Foundation
 // Run:   ./metal_roofline
 //
@@ -391,6 +392,178 @@ func benchmarkCompute(_ device: MTLDevice, _ queue: MTLCommandQueue) {
   print()
 }
 
+// MARK: - MPP GEMM Benchmark (macOS 15+)
+
+// TN layout: A[K,M] row-major × B[K,N] row-major → C[M,N] row-major
+//            Logical: C = A_logical^T @ B,  A_logical[M,K]
+// Templated over element type so a single shader covers float, half, bfloat.
+let mppShaderSource = """
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+using namespace metal;
+using namespace mpp::tensor_ops;
+
+constant constexpr int TILE_M = 64;
+constant constexpr int TILE_N = 32;
+
+template<typename T>
+kernel void gemm_tn_typed(
+    device T*       A      [[buffer(0)]],
+    device T*       B      [[buffer(1)]],
+    device T*       C      [[buffer(2)]],
+    constant uint4& sizes  [[buffer(3)]],
+    uint2 tgid             [[threadgroup_position_in_grid]])
+{
+    const uint M = sizes.x, K = sizes.y, N = sizes.z;
+    device T* A_tile = A + tgid.y * TILE_M;
+    device T* B_tile = B + tgid.x * TILE_N;
+    device T* C_tile = C + tgid.y * TILE_M * N + tgid.x * TILE_N;
+
+    // A[K,M] row-major: col-major [TILE_M,K], strides {1,M} → transpose_left=true
+    tensor<device T, extents<int32_t, TILE_M, dynamic_extent>, tensor_inline> mA(
+        A_tile, extents<int32_t, TILE_M, dynamic_extent>(K), array<int32_t, 2>{1, (int)M});
+    // B[K,N] row-major: col-major [TILE_N,K], strides {1,N} → transpose_right=false
+    tensor<device T, extents<int32_t, TILE_N, dynamic_extent>, tensor_inline> mB(
+        B_tile, extents<int32_t, TILE_N, dynamic_extent>(K), array<int32_t, 2>{1, (int)N});
+    // C[M,N] row-major tile: col-major [TILE_N,TILE_M], strides {1,N}
+    tensor<device T, extents<int32_t, TILE_N, TILE_M>, tensor_inline> mC(
+        C_tile, extents<int32_t, TILE_N, TILE_M>(), array<int32_t, 2>{1, (int)N});
+
+    constexpr auto desc = matmul2d_descriptor(TILE_M, TILE_N,
+        static_cast<int>(dynamic_extent), /*transpose_left=*/true, /*transpose_right=*/false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    op.run(mA, mB, mC);
+}
+
+template [[host_name("gemm_tn_float")]]
+kernel void gemm_tn_typed<float>(device float*, device float*, device float*, constant uint4&, uint2);
+template [[host_name("gemm_tn_half")]]
+kernel void gemm_tn_typed<half>(device half*, device half*, device half*, constant uint4&, uint2);
+template [[host_name("gemm_tn_bfloat")]]
+kernel void gemm_tn_typed<bfloat>(device bfloat*, device bfloat*, device bfloat*, constant uint4&, uint2);
+"""
+
+struct MPPTypeConfig {
+  let name: String
+  let elementSize: Int
+  let pipeline: MTLComputePipelineState
+}
+
+
+func benchmarkMPP(_ device: MTLDevice, _ queue: MTLCommandQueue) {
+  print("=== MPP matmul2d — TN layout (A[K,M]ᵀ @ B[K,N] → C[M,N]) ===")
+
+  // Compile the MPP shader; bail gracefully if MPP is unavailable.
+  let lib: MTLLibrary
+  do {
+    lib = try device.makeLibrary(source: mppShaderSource, options: nil)
+  } catch {
+    print("MPP shader compilation failed: \(error)")
+    print("Skipping MPP benchmark.")
+    print()
+    return
+  }
+
+  let configs: [MPPTypeConfig] = ["float", "half", "bfloat"].compactMap { name in
+    guard let fn = lib.makeFunction(name: "gemm_tn_\(name)"),
+          let ps = try? device.makeComputePipelineState(function: fn)
+    else { print("  \(name): pipeline creation failed, skipping"); return nil }
+    return MPPTypeConfig(name: name, elementSize: name == "float" ? 4 : 2, pipeline: ps)
+  }
+  guard !configs.isEmpty else { print(); return }
+  print("  SIMD width: \(configs[0].pipeline.threadExecutionWidth)")
+  print()
+
+  // Each entry: (section header or nil, M, N, K).  M must be ×64, N ×32.
+  let sweep: [(section: String?, M: Int, N: Int, K: Int)] = [
+    ("Square (scaling)",      128,  128,  128),
+    (nil,                     512,  512,  512),
+    (nil,                    1024, 1024, 1024),
+    (nil,                    2048, 2048, 2048),
+    (nil,                    4096, 4096, 4096),
+    ("Vary M  (N=K=4096)",     64, 4096, 4096),
+    (nil,                     128, 4096, 4096),
+    (nil,                     256, 4096, 4096),
+    (nil,                     512, 4096, 4096),
+    (nil,                    1024, 4096, 4096),
+    (nil,                    2048, 4096, 4096),
+    (nil,                    4096, 4096, 4096),
+    ("Vary K  (M=N=1024)",   1024, 1024,   64),
+    (nil,                    1024, 1024,  256),
+    (nil,                    1024, 1024, 1024),
+    (nil,                    1024, 1024, 4096),
+    ("Vary N  (M=K=512)",     512,   32,  512),
+    (nil,                     512,  256,  512),
+    (nil,                     512, 1024,  512),
+    (nil,                     512, 4096,  512),
+  ]
+
+  let TILE_M = 64, TILE_N = 32
+  let w = 7
+  let typeColW = 10
+  let hdr =
+    "M".padding(toLength: w, withPad: " ", startingAt: 0) +
+    "N".padding(toLength: w, withPad: " ", startingAt: 0) +
+    "K".padding(toLength: w, withPad: " ", startingAt: 0) +
+    configs.map { $0.name.padding(toLength: typeColW, withPad: " ", startingAt: 0) }.joined()
+  let sep = String(repeating: "-", count: hdr.count)
+
+  var peaks = [String: Double]()
+  for c in configs { peaks[c.name] = 0.0 }
+
+  for s in sweep {
+    if let label = s.section {
+      print()
+      print("  \(label)")
+      print("  " + hdr)
+      print("  " + sep)
+    }
+    let (M, N, K) = (s.M, s.N, s.K)
+    var line =
+      "\(M)".padding(toLength: w, withPad: " ", startingAt: 0) +
+      "\(N)".padding(toLength: w, withPad: " ", startingAt: 0) +
+      "\(K)".padding(toLength: w, withPad: " ", startingAt: 0)
+
+    for c in configs {
+      let eSize = c.elementSize
+      let bufA = device.makeBuffer(length: K * M * eSize, options: .storageModeShared)!
+      let bufB = device.makeBuffer(length: K * N * eSize, options: .storageModeShared)!
+      let bufC = device.makeBuffer(length: M * N * eSize, options: .storageModeShared)!
+      memset(bufA.contents(), 0x3C, K * M * eSize)
+      memset(bufB.contents(), 0x3C, K * N * eSize)
+      var sizes = SIMD4<UInt32>(UInt32(M), UInt32(K), UInt32(N), 0)
+      let sizeBuf = device.makeBuffer(
+        bytes: &sizes, length: MemoryLayout<SIMD4<UInt32>>.stride,
+        options: .storageModeShared)!
+
+      let simdW = c.pipeline.threadExecutionWidth
+      let numTGX = (N + TILE_N - 1) / TILE_N
+      let numTGY = (M + TILE_M - 1) / TILE_M
+
+      let time = measureGPUTime(queue, label: "mpp_\(c.name)") { enc in
+        enc.setComputePipelineState(c.pipeline)
+        enc.setBuffer(bufA,   offset: 0, index: 0)
+        enc.setBuffer(bufB,   offset: 0, index: 1)
+        enc.setBuffer(bufC,   offset: 0, index: 2)
+        enc.setBuffer(sizeBuf, offset: 0, index: 3)
+        enc.dispatchThreadgroups(
+          MTLSize(width: numTGX, height: numTGY, depth: 1),
+          threadsPerThreadgroup: MTLSize(width: simdW * 4, height: 1, depth: 1))
+      }
+      let tflops = Double(2 * M * N * K) / time / 1e12
+      if tflops > peaks[c.name]! { peaks[c.name] = tflops }
+      line += String(format: "%-\(typeColW).2f", tflops)
+    }
+    print("  " + line)
+  }
+
+  print()
+  print("  Peak TFLOPS:")
+  for c in configs {
+    print("    \(c.name.padding(toLength: 8, withPad: " ", startingAt: 0))\(String(format: "%.2f", peaks[c.name]!))")
+  }
+  print()
+}
+
 // MARK: - Main
 
 let (device, queue) = makeDevice()
@@ -427,3 +600,11 @@ print()
 
 benchmarkMemory(device, queue)
 benchmarkCompute(device, queue)
+
+if #available(macOS 26.0, *) {
+  benchmarkMPP(device, queue)
+} else {
+  print("=== MPP matmul2d ===")
+  print("Requires macOS 26.0+ (MetalPerformancePrimitives not available), skipping.")
+  print()
+}
