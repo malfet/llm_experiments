@@ -1,22 +1,26 @@
 // Metal GPU roofline benchmark: measures peak compute (FP32/FP16/BF16/INT), memory bandwidth,
-// and — on macOS 15+ — MPP matmul2d GEMM throughput (float/half/bfloat, TN layout).
+// and — on macOS 26.0+ — MPP matmul2d GEMM throughput (float/half/bfloat, TN layout).
 // Build: swiftc -O -o metal_roofline metal_roofline.swift -framework Metal -framework Foundation
 // Run:   ./metal_roofline
 //
 // Results (peak throughput):
-// ┌─────────────┬──────────────────────┬──────────────────────┬──────────────────────┐
-// │ Metric      │ M5 Pro (20-core)     │ M4 Max (40-core)     │ M2 Pro (19-core)     │
-// ├─────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
-// │ FP32  TFLOPS│   7.9 @  8 chains    │  15.5 @ 32 chains    │   2.9 @ 32 chains    │
-// │ FP16  TFLOPS│  12.7 @ 32 chains    │  15.6 @ 32 chains    │   5.5 @ 32 chains    │
-// │ BF16  TFLOPS│   8.2 @  8 chains    │  15.7 @ 32 chains    │   1.0 @  8 chains    │
-// │ INT16 GIOPS │   4.1 @  6 chains    │   4.0 @  5 chains    │   1.7 @  5 chains    │
-// │ INT32 GIOPS │   4.1 @  5 chains    │   4.0 @  5 chains    │   1.7 @  3 chains    │
-// │ INT64 GIOPS │   1.0 @  2 chains    │   1.0 @  1 chain     │   0.4 @  2 chains    │
-// │ DRAM  GB/s  │   275 copy / 282 fill│   468 copy / 527 fill│   192 copy / 213 fill│
-// │ L2    GB/s  │   729 copy @ 2MB     │  1307 copy @ 12MB    │   470 copy @ 6MB     │
-// │ L2 size     │  8-12 MB             │ 12-16 MB             │  8-12 MB             │
-// └─────────────┴──────────────────────┴──────────────────────┴──────────────────────┘
+// ┌────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┐
+// │ Metric         │ M5 Pro (20-core)     │ M4 Max (40-core)     │ M4 Pro (20-core)     │ M2 Pro (19-core)     │
+// ├────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
+// │ FP32 FMA TFLOPS│   7.9 @  8 chains    │  15.5 @ 32 chains    │   7.7 @ 16 chains    │   2.9 @ 32 chains    │
+// │ FP16 FMA TFLOPS│  12.7 @ 32 chains    │  15.6 @ 32 chains    │   7.9 @ 24 chains    │   5.5 @ 32 chains    │
+// │ BF16 FMA TFLOPS│   8.2 @  8 chains    │  15.7 @ 32 chains    │   7.9 @ 24 chains    │   1.0 @  8 chains    │
+// │ INT16 GIOPS    │   4.1 @  6 chains    │   4.0 @  5 chains    │   2.0 @  3 chains    │   1.7 @  5 chains    │
+// │ INT32 GIOPS    │   4.1 @  5 chains    │   4.0 @  5 chains    │   2.0 @  2 chains    │   1.7 @  3 chains    │
+// │ INT64 GIOPS    │   1.0 @  2 chains    │   1.0 @  1 chain     │   0.5 @  1 chain     │   0.4 @  2 chains    │
+// │ DRAM  GB/s     │   275 copy / 282 fill│   468 copy / 527 fill│   222 copy / 214 fill│   192 copy / 213 fill│
+// │ L2    GB/s     │   729 copy @ 2MB     │  1307 copy @ 12MB    │   308 copy @ 6MB     │   470 copy @ 6MB     │
+// │ L2 size        │  8-12 MB             │ 12-16 MB             │ 12-16 MB             │  8-12 MB             │
+// ├────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
+// │ FP32 MM TFLOPS │                      │                      │   4.1                │                      │
+// │ FP16 MM TFLOPS │                      │                      │   7.5                │                      │
+// │ BF16 MM TFLOPS │                      │                      │   7.5                │                      │
+// └────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┘
 
 import Foundation
 import Metal
