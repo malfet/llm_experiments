@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import random
 import time
 from pathlib import Path
@@ -10,6 +11,12 @@ import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file
 from transformers import AutoTokenizer
+
+
+DEFAULT_PROMPT = '''def print_prime(n):
+   """
+   Print all primes between 1 and n
+   """'''
 
 
 class PhiAttention(nn.Module):
@@ -23,6 +30,8 @@ class PhiAttention(nn.Module):
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
         self.dense = nn.Linear(dim, dim)
+        # Set to a list to record per-head attention probabilities (heads, queries, keys) on every call
+        self.recorded_probs = None
 
     def forward(self, x, cos, sin, kv_cache):
         bsz, seqlen, _ = x.shape
@@ -36,6 +45,8 @@ class PhiAttention(nn.Module):
             kv_cache["k"], kv_cache["v"] = k, v
         # Causal mask is only needed when processing more than one new token (prefill)
         out = F.scaled_dot_product_attention(q, k, v, is_causal=seqlen > 1)
+        if self.recorded_probs is not None:
+            self.recorded_probs.append(attention_probs(q, k)[0])
         return self.dense(out.transpose(1, 2).reshape(bsz, seqlen, -1))
 
 
@@ -121,6 +132,15 @@ class PhiForCausalLM(nn.Module):
         return self.lm_head(self.model.final_layernorm(hidden)).float()
 
 
+def attention_probs(q, k):
+    """Explicit causal softmax(QK^T / sqrt(d)) in float32; queries are the last q.shape[2] key positions."""
+    q_len, k_len = q.shape[2], k.shape[2]
+    scores = (q.float() @ k.float().transpose(-2, -1)) / math.sqrt(q.shape[-1])
+    q_pos = torch.arange(k_len - q_len, k_len, device=q.device)[:, None]
+    k_pos = torch.arange(k_len, device=q.device)[None, :]
+    return scores.masked_fill(k_pos > q_pos, float("-inf")).softmax(dim=-1)
+
+
 def rotate_half(x):
     x1, x2 = x.chunk(2, dim=-1)
     return torch.cat([-x2, x1], dim=-1)
@@ -140,7 +160,8 @@ def generate(model, input_ids, max_new_tokens, exit_layer):
     for _ in range(max_new_tokens):
         next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
         new_tokens.append(next_token.item())
-        exit_tokens.append(exit_logits[:, -1].argmax(dim=-1).item())
+        if exit_logits is not None:
+            exit_tokens.append(exit_logits[:, -1].argmax(dim=-1).item())
         logits, exit_logits = model(next_token, input_ids.shape[1] + len(new_tokens) - 1, kv_caches, exit_layer)
     return new_tokens, exit_tokens
 
@@ -165,6 +186,7 @@ def side_by_side(tokenizer, tokens, exit_tokens, left_title, right_title, width=
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--max-new-tokens", type=int, default=150)
     parser.add_argument("--exit-layer", type=int, default=None,
                         help="Also attach final LayerNorm + LM head after this many layers (random if omitted)")
@@ -179,11 +201,7 @@ def main():
     num_layers = len(model.model.layers)
     exit_layer = args.exit_layer or random.randint(1, num_layers - 1)
 
-    prompt = '''def print_prime(n):
-   """
-   Print all primes between 1 and n
-   """'''
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids.to(device)
 
     start = time.perf_counter()
     new_tokens, exit_tokens = generate(model, input_ids, args.max_new_tokens, exit_layer)
